@@ -1,0 +1,69 @@
+# Binaries
+bin/
+oc-mirror-test
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.html
+coverage.txt
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work
+
+# Generated directories and test artifacts
+oc-mirror-clone/
+mirror/
+platform/
+operators/
+operators-v1/
+operators-v2/
+results/
+*.yaml.bak
+*.yaml.tmp
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
+
+# IDE
+.idea/
+.vscode/
+*.code-workspace
+.project
+.classpath
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# Editor backups
+*~
+.#*
+\#*#
+.*.swp
+.*.swo

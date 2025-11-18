@@ -1,6 +1,6 @@
 # Binaries
 bin/
-oc-mirror-test
+/oc-mirror-test
 *.exe
 *.exe~
 *.dll

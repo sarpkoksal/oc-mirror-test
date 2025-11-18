@@ -324,7 +324,6 @@ func (tr *TestRunner) runDownloadPhase(isCleanRun bool, version string) (PhaseMe
 	if version == "v2" {
 		cmd.SetCacheDir("operators-v2")
 	}
-	cmd.SetVerbose(true)
 
 	startTime := time.Now()
 	output, err := cmd.Execute()
@@ -375,7 +374,6 @@ func (tr *TestRunner) runUploadPhase(version string) (PhaseMetrics, error) {
 	cmd.SetConfig(platformConfigPath)
 	cmd.SetFrom("file://platform/mirror")
 	cmd.SetOutput(registryURL)
-	cmd.SetVerbose(true)
 
 	startTime := time.Now()
 	output, err := cmd.Execute()

@@ -16,7 +16,6 @@ type OCMirrorCommand struct {
 	output          string
 	from            string
 	cacheDir        string
-	verbose         bool
 	skipMissing     bool
 	continueOnError bool
 }
@@ -34,7 +33,6 @@ func NewOCMirrorCommand() *OCMirrorCommand {
 	return &OCMirrorCommand{
 		v2:              false,
 		removeSignatures: true,
-		verbose:         false,
 	}
 }
 
@@ -66,11 +64,6 @@ func (cmd *OCMirrorCommand) SetFrom(from string) {
 // SetCacheDir sets the cache directory
 func (cmd *OCMirrorCommand) SetCacheDir(cacheDir string) {
 	cmd.cacheDir = cacheDir
-}
-
-// SetVerbose sets verbose mode
-func (cmd *OCMirrorCommand) SetVerbose(verbose bool) {
-	cmd.verbose = verbose
 }
 
 // SetSkipMissing sets skip-missing flag
@@ -148,19 +141,6 @@ func (cmd *OCMirrorCommand) buildArgs() []string {
 
 	if cmd.output != "" {
 		args = append(args, cmd.output)
-	}
-
-	if cmd.v2 {
-		// v2 supports boolean flags
-		if cmd.verbose {
-			args = append(args, "-v")
-		}
-	} else {
-		// v1 requires integer for verbose flag (1-9)
-		if cmd.verbose {
-			// Use maximum verbosity for v1 when verbose is requested
-			args = append(args, "-v", "9")
-		}
 	}
 
 	return args

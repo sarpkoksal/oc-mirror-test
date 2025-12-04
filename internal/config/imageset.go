@@ -78,14 +78,14 @@ mirror:
               maxVersion: 4.19.6-rhodf
         - name: cluster-logging
           channels:
-            - name: stable-6.3
-              minVersion: 6.3.1
-              maxVersion: 6.3.1
+            - name: stable-6.4
+              minVersion: 6.4.0
+              maxVersion: 6.4.0
         - name: loki-operator
           channels:
-            - name: stable-6.3
-              minVersion: 6.3.1
-              maxVersion: 6.3.1
+            - name: stable-6.4
+              minVersion: 6.4.0
+              maxVersion: 6.4.0
 `
 
 	return os.WriteFile(configPath, []byte(configContent), 0644)
@@ -167,14 +167,14 @@ mirror:
               maxVersion: 4.19.6-rhodf
         - name: cluster-logging
           channels:
-            - name: stable-6.3
-              minVersion: 6.3.1
-              maxVersion: 6.3.1
+            - name: stable-6.4
+              minVersion: 6.4.0
+              maxVersion: 6.4.0
         - name: loki-operator
           channels:
-            - name: stable-6.3
-              minVersion: 6.3.1
-              maxVersion: 6.3.1
+            - name: stable-6.4
+              minVersion: 6.4.0
+              maxVersion: 6.4.0
 `
 
 	return os.WriteFile(path, []byte(configContent), 0644)

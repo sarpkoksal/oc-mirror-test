@@ -308,6 +308,7 @@ func (tr *TestRunner) runDownloadPhase(isCleanRun bool, version string) (PhaseMe
 	cmd := command.NewOCMirrorCommand()
 	cmd.SetV2(version == "v2")
 	cmd.SetRemoveSignatures(false)
+	cmd.SetSkipTLS(tr.config.SkipTLS)
 	
 	// Use version-specific config file
 	var configFile string
@@ -364,6 +365,7 @@ func (tr *TestRunner) runUploadPhase(version string) (PhaseMetrics, error) {
 
 	// Ensure registry URL has a scheme prefix
 	registryURL := tr.config.RegistryURL
+	registryURL = strings.TrimRight(registryURL, "/")
 	if !strings.Contains(registryURL, "://") {
 		// Default to docker:// if no scheme is provided
 		registryURL = "docker://" + registryURL
@@ -372,8 +374,17 @@ func (tr *TestRunner) runUploadPhase(version string) (PhaseMetrics, error) {
 	cmd := command.NewOCMirrorCommand()
 	cmd.SetV2(version == "v2")
 	cmd.SetConfig(platformConfigPath)
-	cmd.SetFrom("file://platform/mirror")
+	
+	if version == "v1" {
+		// v1 uses plain path
+		cmd.SetFrom("platform/mirror")
+	} else {
+		// v2 uses file:// prefix
+		cmd.SetFrom("file://platform/mirror")
+	}
+	
 	cmd.SetOutput(registryURL)
+	cmd.SetSkipTLS(tr.config.SkipTLS)
 
 	startTime := time.Now()
 	output, err := cmd.Execute()
@@ -404,6 +415,14 @@ func (tr *TestRunner) prepareUploadMirror(version string) error {
 		sourceDir = "mirror/operators-v2"
 	}
 	targetDir := "platform/mirror"
+
+	// Remove target directory first to avoid nesting if it exists
+	if err := os.RemoveAll(targetDir); err != nil {
+		return fmt.Errorf("failed to clean target directory: %w", err)
+	}
+	// Recreate target directory will be handled by cp or we can just let cp do it if we copy contents
+	// But since we want to use cp -r source target, we want target to be the copy of source
+	// So we just run cp -r source target
 
 	// Use cp command to copy directory
 	cmd := exec.Command("cp", "-r", sourceDir, targetDir)

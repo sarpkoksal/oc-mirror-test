@@ -18,6 +18,7 @@ type OCMirrorCommand struct {
 	cacheDir        string
 	skipMissing     bool
 	continueOnError bool
+	skipTLS         bool
 }
 
 // CommandOutput contains the output from oc-mirror execution
@@ -76,6 +77,11 @@ func (cmd *OCMirrorCommand) SetContinueOnError(continueOn bool) {
 	cmd.continueOnError = continueOn
 }
 
+// SetSkipTLS sets skip-tls flag
+func (cmd *OCMirrorCommand) SetSkipTLS(skip bool) {
+	cmd.skipTLS = skip
+}
+
 // Execute runs the oc-mirror command
 func (cmd *OCMirrorCommand) Execute() (*CommandOutput, error) {
 	args := cmd.buildArgs()
@@ -119,6 +125,9 @@ func (cmd *OCMirrorCommand) buildArgs() []string {
 		if cmd.cacheDir != "" {
 			args = append(args, "--cache-dir", cmd.cacheDir)
 		}
+		if cmd.skipTLS {
+			args = append(args, "--dest-tls-verify=false")
+		}
 	} else {
 		// v1 doesn't support --remove-signatures or --cache-dir flags
 		// v1 is deprecated but we still support it for comparison
@@ -128,6 +137,9 @@ func (cmd *OCMirrorCommand) buildArgs() []string {
 		}
 		if cmd.continueOnError {
 			args = append(args, "--continue-on-error")
+		}
+		if cmd.skipTLS {
+			args = append(args, "--dest-skip-tls")
 		}
 	}
 

@@ -12,6 +12,7 @@ func main() {
 	var registryURL string
 	var iterations int
 	var compareV1V2 bool
+	var skipTLS bool
 
 	var rootCmd = &cobra.Command{
 		Use:   "oc-mirror-test",
@@ -27,6 +28,7 @@ func main() {
 				RegistryURL: registryURL,
 				Iterations:  iterations,
 				CompareV1V2: compareV1V2,
+				SkipTLS:     skipTLS,
 			}
 
 			testRunner := runner.NewTestRunner(config)
@@ -40,6 +42,7 @@ func main() {
 	rootCmd.Flags().StringVarP(&registryURL, "registry", "r", "", "Registry URL (e.g., docker://infra.5g-deployment.lab:8443/ocp/)")
 	rootCmd.Flags().IntVarP(&iterations, "iterations", "i", 2, "Number of iterations to run (minimum 2 for clean vs cached comparison)")
 	rootCmd.Flags().BoolVar(&compareV1V2, "compare-v1-v2", false, "Compare v1 and v2 runs of the same imageset configuration")
+	rootCmd.Flags().BoolVar(&skipTLS, "skip-tls", false, "Skip TLS verification for registry")
 
 	rootCmd.MarkFlagRequired("registry")
 

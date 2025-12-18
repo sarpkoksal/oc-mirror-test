@@ -5,4 +5,5 @@ type Config struct {
 	RegistryURL string
 	Iterations  int
 	CompareV1V2 bool
+	SkipTLS     bool
 }

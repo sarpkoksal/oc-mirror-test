@@ -3,27 +3,34 @@ package runner
 import (
 	"time"
 
+	"github.com/telco-core/ngc-495/pkg/command"
 	"github.com/telco-core/ngc-495/pkg/monitor"
 )
 
 // TestResult represents the results of a single test iteration
 type TestResult struct {
-	Iteration      int                    `json:"iteration"`
-	IsCleanRun     bool                   `json:"is_clean_run"`
-	Version        string                 `json:"version"` // "v1" or "v2"
-	DownloadPhase  PhaseMetrics           `json:"download_phase"`
-	UploadPhase    PhaseMetrics           `json:"upload_phase"`
-	NetworkMetrics monitor.NetworkMetrics `json:"network_metrics"`
-	Summary        string                 `json:"summary"`
+	Iteration       int                      `json:"iteration"`
+	IsCleanRun      bool                     `json:"is_clean_run"`
+	Version         string                   `json:"version"` // "v1" or "v2"
+	DownloadPhase   PhaseMetrics             `json:"download_phase"`
+	UploadPhase     PhaseMetrics             `json:"upload_phase"`
+	NetworkMetrics  monitor.NetworkMetrics   `json:"network_metrics"`
+	ResourceMetrics monitor.ResourceMetrics  `json:"resource_metrics"`
+	OutputMetrics   monitor.OutputMetrics    `json:"output_metrics"`
+	DescribeMetrics *command.DescribeMetrics `json:"describe_metrics,omitempty"`
+	Summary         string                   `json:"summary"`
 }
 
 // PhaseMetrics represents metrics for a single phase (download or upload)
 type PhaseMetrics struct {
-	WallTime      time.Duration `json:"wall_time_seconds"`
-	BytesUploaded int64         `json:"bytes_uploaded"`
-	Logs          []string      `json:"logs"`
-	ImagesSkipped int           `json:"images_skipped"`
-	CacheHits     int           `json:"cache_hits"`
+	WallTime        time.Duration            `json:"wall_time_seconds"`
+	BytesUploaded   int64                    `json:"bytes_uploaded"`
+	Logs            []string                 `json:"logs,omitempty"`
+	ImagesSkipped   int                      `json:"images_skipped"`
+	CacheHits       int                      `json:"cache_hits"`
+	DownloadMetrics monitor.DownloadMetrics  `json:"download_metrics,omitempty"`
+	ResourceMetrics monitor.ResourceMetrics  `json:"resource_metrics,omitempty"`
+	ExtendedMetrics command.ExtendedMetrics  `json:"extended_metrics,omitempty"`
 }
 
 // ComparisonResult represents comparison between v1 and v2 or clean vs cached

@@ -117,7 +117,7 @@ make build
 2. **Iteration Execution** (for each iteration):
    - **Clean Run (Iteration 1)**:
      - Cleans workspace directories
-     - Runs download phase: `oc-mirror --v2 --remove-signatures=false -c <config> file://mirror/operators --cache-dir operators`
+     - Runs download phase: `oc-mirror --v2 -c <config> file://mirror/operators --cache-dir operators`
      - Copies mirror to platform directory
      - Runs upload phase: `oc-mirror --v2 -c <config> --from file://platform/mirror <registry-url>`
    

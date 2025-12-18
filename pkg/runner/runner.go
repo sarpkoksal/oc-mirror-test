@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -109,7 +108,7 @@ func (tr *TestRunner) runV1V2Comparison() error {
 	for i := 0; i < tr.config.Iterations; i++ {
 		isCleanRun := i == 0
 		fmt.Printf("\n[V1] Iteration %d/%d (%s)\n", i+1, tr.config.Iterations, map[bool]string{true: "CLEAN", false: "CACHED"}[isCleanRun])
-		
+
 		result, err := tr.runIteration(i+1, isCleanRun, "v1")
 		if err != nil {
 			return fmt.Errorf("v1 iteration %d failed: %w", i+1, err)
@@ -133,7 +132,7 @@ func (tr *TestRunner) runV1V2Comparison() error {
 	for i := 0; i < tr.config.Iterations; i++ {
 		isCleanRun := i == 0
 		fmt.Printf("\n[V2] Iteration %d/%d (%s)\n", i+1, tr.config.Iterations, map[bool]string{true: "CLEAN", false: "CACHED"}[isCleanRun])
-		
+
 		result, err := tr.runIteration(i+1, isCleanRun, "v2")
 		if err != nil {
 			return fmt.Errorf("v2 iteration %d failed: %w", i+1, err)
@@ -163,9 +162,9 @@ func (tr *TestRunner) setupDirectories() error {
 		"mirror/operators-v2",
 		"platform",
 		"platform/mirror",
-		"operators",      // v2 cache directory
-		"operators-v1",   // v1 cache directory
-		"operators-v2",   // v2 cache directory
+		"operators",    // v2 cache directory
+		"operators-v1", // v1 cache directory
+		"operators-v2", // v2 cache directory
 		"results",
 	}
 
@@ -198,21 +197,22 @@ func (tr *TestRunner) runIteration(iterationNum int, isCleanRun bool, version st
 		fmt.Printf("Warning: Failed to start network monitoring: %v\n", err)
 	}
 
+	// Start overall resource monitoring for the entire iteration
+	overallResourceMonitor := monitor.NewResourceMonitor()
+	if err := overallResourceMonitor.Start(); err != nil {
+		fmt.Printf("Warning: Failed to start overall resource monitoring: %v\n", err)
+	}
+
 	// Run download phase
 	fmt.Printf("\n  ┌─ Download Phase (%s) ───────────────────────────────────────┐\n", version)
 	downloadMetrics, err := tr.runDownloadPhase(isCleanRun, version)
 	if err != nil {
 		networkMonitor.Stop()
+		overallResourceMonitor.Stop()
 		return result, fmt.Errorf("download phase failed: %w", err)
 	}
 	result.DownloadPhase = downloadMetrics
 	fmt.Printf("  └─────────────────────────────────────────────────────────────┘\n")
-
-	// Copy mirror to platform directory for upload
-	if err := tr.prepareUploadMirror(version); err != nil {
-		networkMonitor.Stop()
-		return result, fmt.Errorf("failed to prepare upload mirror: %w", err)
-	}
 
 	// Start network monitoring for upload phase
 	uploadNetworkMonitor := monitor.NewNetworkMonitor()
@@ -229,6 +229,7 @@ func (tr *TestRunner) runIteration(iterationNum int, isCleanRun bool, version st
 	uploadMetrics, err := tr.runUploadPhase(version)
 	if err != nil {
 		uploadNetworkMonitor.Stop()
+		overallResourceMonitor.Stop()
 		return result, fmt.Errorf("upload phase failed: %w", err)
 	}
 	result.UploadPhase = uploadMetrics
@@ -242,6 +243,36 @@ func (tr *TestRunner) runIteration(iterationNum int, isCleanRun bool, version st
 		result.NetworkMetrics.PeakBandwidthMbps = uploadNetworkMetrics.PeakBandwidthMbps
 	}
 	result.NetworkMetrics.AverageBandwidthMbps = (result.NetworkMetrics.AverageBandwidthMbps + uploadNetworkMetrics.AverageBandwidthMbps) / 2
+
+	// Stop overall resource monitoring
+	result.ResourceMetrics = overallResourceMonitor.Stop()
+
+	// Analyze output directory
+	var mirrorPath string
+	if version == "v1" {
+		mirrorPath = "mirror/operators-v1"
+	} else {
+		mirrorPath = "mirror/operators-v2"
+	}
+	fmt.Printf("\n  ┌─ Output Analysis (%s) ───────────────────────────────────────┐\n", version)
+	outputVerifier := monitor.NewOutputVerifier(mirrorPath)
+	outputMetrics, err := outputVerifier.Analyze()
+	if err != nil {
+		fmt.Printf("  │ Warning: Failed to analyze output: %v\n", err)
+	} else {
+		result.OutputMetrics = outputMetrics
+		outputMetrics.PrintSummary()
+	}
+
+	// Get accurate image/layer counts from oc-mirror describe
+	describeMetrics, err := command.DescribeMirror(mirrorPath + "/")
+	if err != nil {
+		fmt.Printf("  │ Warning: Failed to run oc-mirror describe: %v\n", err)
+	} else {
+		result.DescribeMetrics = describeMetrics
+		describeMetrics.PrintSummary()
+	}
+	fmt.Printf("  └─────────────────────────────────────────────────────────────┘\n")
 
 	// Generate summary
 	result.Summary = tr.generateSummary(result)
@@ -299,16 +330,35 @@ func (tr *TestRunner) runDownloadPhase(isCleanRun bool, version string) (PhaseMe
 	metrics := PhaseMetrics{}
 
 	var mirrorDir string
+	var mirrorPath string // Path for download monitoring (without file:// prefix)
 	if version == "v1" {
 		mirrorDir = "file://mirror/operators-v1"
+		mirrorPath = "mirror/operators-v1"
 	} else {
 		mirrorDir = "file://mirror/operators-v2"
+		mirrorPath = "mirror/operators-v2"
 	}
+
+	// Ensure the mirror directory exists
+	if err := os.MkdirAll(mirrorPath, 0755); err != nil {
+		return metrics, fmt.Errorf("failed to create mirror directory: %w", err)
+	}
+
+	// Start download monitoring for the mirror directory
+	downloadMonitor := monitor.NewDownloadMonitor(mirrorPath)
+	downloadMonitor.SetPollInterval(1 * time.Second)
+	if err := downloadMonitor.Start(); err != nil {
+		fmt.Printf("  │ Warning: Failed to start download monitoring: %v\n", err)
+	}
+
+	// Prepare resource monitor for oc-mirror process (will be started when we get the PID)
+	resourceMonitor := monitor.NewResourceMonitor()
+	resourceMonitor.SetPollInterval(500 * time.Millisecond) // More frequent sampling for child process
 
 	cmd := command.NewOCMirrorCommand()
 	cmd.SetV2(version == "v2")
-	cmd.SetRemoveSignatures(false)
-	
+	cmd.SetSkipTLS(tr.config.SkipTLS)
+
 	// Use version-specific config file
 	var configFile string
 	if version == "v1" {
@@ -326,10 +376,33 @@ func (tr *TestRunner) runDownloadPhase(isCleanRun bool, version string) (PhaseMe
 	}
 
 	startTime := time.Now()
-	output, err := cmd.Execute()
+
+	// Execute with callback to get oc-mirror process PID for monitoring
+	output, err := cmd.ExecuteWithCallback(func(pid int) {
+		// Set target PID to monitor the oc-mirror process, not the test runner
+		resourceMonitor.SetTargetPID(pid)
+		if startErr := resourceMonitor.Start(); startErr != nil {
+			fmt.Printf("  │ Warning: Failed to start resource monitoring for oc-mirror (PID %d): %v\n", pid, startErr)
+		} else {
+			fmt.Printf("  │ Monitoring oc-mirror process (PID: %d)\n", pid)
+		}
+	})
 	metrics.WallTime = time.Since(startTime)
 
+	// Stop all monitors and collect metrics
+	downloadMetrics := downloadMonitor.Stop()
+	metrics.DownloadMetrics = downloadMetrics
+
+	resourceMetrics := resourceMonitor.Stop()
+	metrics.ResourceMetrics = resourceMetrics
+
+	// Extract extended metrics from logs
+	extendedMetrics := output.ExtractExtendedMetrics()
+	metrics.ExtendedMetrics = extendedMetrics
+
 	if err != nil {
+		// Still collect metrics even on error
+		fmt.Printf("  │ Download failed but collected metrics\n")
 		return metrics, fmt.Errorf("oc-mirror download failed: %w", err)
 	}
 
@@ -338,29 +411,18 @@ func (tr *TestRunner) runDownloadPhase(isCleanRun bool, version string) (PhaseMe
 	metrics.ImagesSkipped = output.CountSkippedImages()
 	metrics.CacheHits = output.CountCacheHits()
 
+	// Print comprehensive download summary
 	fmt.Printf("  │ Download completed in %v\n", metrics.WallTime)
-	fmt.Printf("  │ Images skipped: %d\n", metrics.ImagesSkipped)
-	fmt.Printf("  │ Cache hits: %d\n", metrics.CacheHits)
+	fmt.Printf("  │ Images skipped: %d | Cache hits: %d\n", metrics.ImagesSkipped, metrics.CacheHits)
+	downloadMetrics.PrintSummary()
+	resourceMetrics.PrintSummary()
+	extendedMetrics.PrintSummary()
 
 	return metrics, nil
 }
 
 func (tr *TestRunner) runUploadPhase(version string) (PhaseMetrics, error) {
 	metrics := PhaseMetrics{}
-
-	// Create platform config with version-specific API version
-	var platformConfigPath string
-	var apiVersion string
-	if version == "v1" {
-		platformConfigPath = "platform/platform_config-v1.yaml"
-		apiVersion = "v1alpha2"
-	} else {
-		platformConfigPath = "platform/platform_config-v2.yaml"
-		apiVersion = "v2alpha1"
-	}
-	if err := config.CreatePlatformConfigWithVersion(platformConfigPath, apiVersion); err != nil {
-		return metrics, fmt.Errorf("failed to create platform config: %w", err)
-	}
 
 	// Ensure registry URL has a scheme prefix
 	registryURL := tr.config.RegistryURL
@@ -369,17 +431,57 @@ func (tr *TestRunner) runUploadPhase(version string) (PhaseMetrics, error) {
 		registryURL = "docker://" + registryURL
 	}
 
+	// Prepare resource monitor for oc-mirror process (will be started when we get the PID)
+	resourceMonitor := monitor.NewResourceMonitor()
+	resourceMonitor.SetPollInterval(500 * time.Millisecond) // More frequent sampling for child process
+
 	cmd := command.NewOCMirrorCommand()
 	cmd.SetV2(version == "v2")
-	cmd.SetConfig(platformConfigPath)
-	cmd.SetFrom("file://platform/mirror")
-	cmd.SetOutput(registryURL)
+	cmd.SetSkipTLS(tr.config.SkipTLS)
+
+	if version == "v1" {
+		// v1: Use platform config with --from flag to upload from local mirror
+		platformConfigPath := "platform/platform_config-v1.yaml"
+		if err := config.CreatePlatformConfigWithVersion(platformConfigPath, "v1alpha2"); err != nil {
+			return metrics, fmt.Errorf("failed to create platform config: %w", err)
+		}
+		cmd.SetConfig(platformConfigPath)
+		cmd.SetFrom("mirror/operators-v1/")
+		cmd.SetOutput(registryURL)
+	} else {
+		// v2: Use original imageset config with --cache-dir, output directly to registry
+		// Command: oc-mirror --v2 --cache-dir operators-v2 -c <config> --dest-tls-verify=false docker://registry
+		cmd.SetConfig("oc-mirror-clone/imagesetconfiguration_operators-v2.yaml")
+		cmd.SetCacheDir("operators-v2")
+		cmd.SetOutput(registryURL)
+		// Note: v2 does NOT use --from flag
+	}
 
 	startTime := time.Now()
-	output, err := cmd.Execute()
+
+	// Execute with callback to get oc-mirror process PID for monitoring
+	output, err := cmd.ExecuteWithCallback(func(pid int) {
+		// Set target PID to monitor the oc-mirror process, not the test runner
+		resourceMonitor.SetTargetPID(pid)
+		if startErr := resourceMonitor.Start(); startErr != nil {
+			fmt.Printf("  │ Warning: Failed to start resource monitoring for oc-mirror (PID %d): %v\n", pid, startErr)
+		} else {
+			fmt.Printf("  │ Monitoring oc-mirror process (PID: %d)\n", pid)
+		}
+	})
 	metrics.WallTime = time.Since(startTime)
 
+	// Stop resource monitoring
+	resourceMetrics := resourceMonitor.Stop()
+	metrics.ResourceMetrics = resourceMetrics
+
+	// Extract extended metrics from logs
+	extendedMetrics := output.ExtractExtendedMetrics()
+	metrics.ExtendedMetrics = extendedMetrics
+
 	if err != nil {
+		// Still show metrics on error
+		fmt.Printf("  │ Upload failed but collected metrics\n")
 		return metrics, fmt.Errorf("oc-mirror upload failed: %w", err)
 	}
 
@@ -389,45 +491,68 @@ func (tr *TestRunner) runUploadPhase(version string) (PhaseMetrics, error) {
 	metrics.ImagesSkipped = output.CountSkippedImages()
 	metrics.CacheHits = output.CountCacheHits()
 
+	// Print comprehensive upload summary
 	fmt.Printf("  │ Upload completed in %v\n", metrics.WallTime)
-	fmt.Printf("  │ Bytes uploaded: %d (%.2f MB)\n", metrics.BytesUploaded, float64(metrics.BytesUploaded)/(1024*1024))
-	fmt.Printf("  │ Images skipped: %d\n", metrics.ImagesSkipped)
+	fmt.Printf("  │ Bytes uploaded: %s\n", monitor.FormatBytesHuman(metrics.BytesUploaded))
+	fmt.Printf("  │ Images skipped: %d | Cache hits: %d\n", metrics.ImagesSkipped, metrics.CacheHits)
+	resourceMetrics.PrintSummary()
+	extendedMetrics.PrintSummary()
 
 	return metrics, nil
 }
 
-func (tr *TestRunner) prepareUploadMirror(version string) error {
-	var sourceDir string
-	if version == "v1" {
-		sourceDir = "mirror/operators-v1"
-	} else {
-		sourceDir = "mirror/operators-v2"
-	}
-	targetDir := "platform/mirror"
-
-	// Use cp command to copy directory
-	cmd := exec.Command("cp", "-r", sourceDir, targetDir)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to copy mirror directory: %w", err)
-	}
-
-	return nil
-}
-
 func (tr *TestRunner) printIterationSummary(result TestResult) {
-	fmt.Printf("\n╔═══════════════════════════════════════════════════════════════╗\n")
-	fmt.Printf("║  Iteration %d Summary (%s)                                    ║\n", result.Iteration, result.Version)
-	fmt.Printf("╠═══════════════════════════════════════════════════════════════╣\n")
-	fmt.Printf("║  Type: %-55s ║\n", map[bool]string{true: "CLEAN", false: "CACHED"}[result.IsCleanRun])
-	fmt.Printf("║  Download Time: %-45v ║\n", result.DownloadPhase.WallTime)
-	fmt.Printf("║  Upload Time: %-47v ║\n", result.UploadPhase.WallTime)
-	fmt.Printf("║  Total Time: %-49v ║\n", result.DownloadPhase.WallTime+result.UploadPhase.WallTime)
-	fmt.Printf("║  Bytes Uploaded: %-42d (%.2f MB) ║\n", result.UploadPhase.BytesUploaded, float64(result.UploadPhase.BytesUploaded)/(1024*1024))
-	fmt.Printf("║  Download Cache Hits: %-38d ║\n", result.DownloadPhase.CacheHits)
-	fmt.Printf("║  Upload Cache Hits: %-40d ║\n", result.UploadPhase.CacheHits)
-	fmt.Printf("║  Average Bandwidth: %-40.2f Mbps ║\n", result.NetworkMetrics.AverageBandwidthMbps)
-	fmt.Printf("║  Peak Bandwidth: %-43.2f Mbps ║\n", result.NetworkMetrics.PeakBandwidthMbps)
-	fmt.Printf("╚═══════════════════════════════════════════════════════════════╝\n")
+	fmt.Printf("\n╔═══════════════════════════════════════════════════════════════════════════════╗\n")
+	fmt.Printf("║  Iteration %d Summary (%s) - %s                                               ║\n",
+		result.Iteration, result.Version, map[bool]string{true: "CLEAN RUN", false: "CACHED RUN"}[result.IsCleanRun])
+	fmt.Printf("╠═══════════════════════════════════════════════════════════════════════════════╣\n")
+
+	// Timing
+	fmt.Printf("║  TIMING                                                                       ║\n")
+	fmt.Printf("║    Download: %-65v ║\n", result.DownloadPhase.WallTime)
+	fmt.Printf("║    Upload:   %-65v ║\n", result.UploadPhase.WallTime)
+	fmt.Printf("║    Total:    %-65v ║\n", result.DownloadPhase.WallTime+result.UploadPhase.WallTime)
+
+	// Data Transfer
+	fmt.Printf("║  DATA TRANSFER                                                                ║\n")
+	fmt.Printf("║    Downloaded: %-63s ║\n", monitor.FormatBytesHuman(result.DownloadPhase.DownloadMetrics.TotalBytesDownloaded))
+	fmt.Printf("║    Avg Speed:  %.2f MB/s | Peak: %.2f MB/s                                    ║\n",
+		result.DownloadPhase.DownloadMetrics.AverageSpeedMBs, result.DownloadPhase.DownloadMetrics.PeakSpeedMBs)
+
+	// Resource Usage
+	fmt.Printf("║  RESOURCE USAGE                                                               ║\n")
+	fmt.Printf("║    CPU:    Avg %.2f%% | Peak %.2f%%                                            ║\n",
+		result.ResourceMetrics.CPUAvgPercent, result.ResourceMetrics.CPUPeakPercent)
+	fmt.Printf("║    Memory: Avg %.2f MB | Peak %.2f MB                                         ║\n",
+		result.ResourceMetrics.MemoryAvgMB, result.ResourceMetrics.MemoryPeakMB)
+
+	// Network
+	fmt.Printf("║  NETWORK                                                                      ║\n")
+	fmt.Printf("║    Bandwidth: Avg %.2f Mbps | Peak %.2f Mbps                                  ║\n",
+		result.NetworkMetrics.AverageBandwidthMbps, result.NetworkMetrics.PeakBandwidthMbps)
+
+	// Image/Layer Processing (from oc-mirror describe)
+	fmt.Printf("║  MIRROR CONTENT                                                               ║\n")
+	if result.DescribeMetrics != nil {
+		fmt.Printf("║    Images: %d | Layers: %d | Manifests: %d                                    ║\n",
+			result.DescribeMetrics.TotalImages, result.DescribeMetrics.TotalLayers, result.DescribeMetrics.TotalManifests)
+		fmt.Printf("║    Operator Packages: %d | Associations: %d                                   ║\n",
+			result.DescribeMetrics.OperatorPackages, result.DescribeMetrics.TotalAssociations)
+	} else {
+		fmt.Printf("║    (oc-mirror describe not available)                                        ║\n")
+	}
+	fmt.Printf("║    Cache Hits: %d | Errors: %d | Retries: %d                                  ║\n",
+		result.DownloadPhase.CacheHits,
+		result.DownloadPhase.ExtendedMetrics.ErrorCount+result.UploadPhase.ExtendedMetrics.ErrorCount,
+		result.DownloadPhase.ExtendedMetrics.RetryCount+result.UploadPhase.ExtendedMetrics.RetryCount)
+
+	// Output
+	fmt.Printf("║  OUTPUT                                                                       ║\n")
+	fmt.Printf("║    Total Size: %-63s ║\n", monitor.FormatBytesHuman(result.OutputMetrics.TotalSize))
+	fmt.Printf("║    Files: %d | Directories: %d                                                ║\n",
+		result.OutputMetrics.TotalFiles, result.OutputMetrics.TotalDirs)
+
+	fmt.Printf("╚═══════════════════════════════════════════════════════════════════════════════╝\n")
 }
 
 func (tr *TestRunner) compareCleanVsCached() {
@@ -499,51 +624,185 @@ func (tr *TestRunner) compareV1VsV2(v1Results, v2Results []TestResult) {
 		return
 	}
 
-	fmt.Printf("\n╔═══════════════════════════════════════════════════════════════╗\n")
-	fmt.Printf("║  Comparison: V1 vs V2                                          ║\n")
-	fmt.Printf("╠═══════════════════════════════════════════════════════════════╣\n")
+	fmt.Printf("\n╔═══════════════════════════════════════════════════════════════════════════════╗\n")
+	fmt.Printf("║                    COMPREHENSIVE V1 vs V2 COMPARISON                          ║\n")
+	fmt.Printf("╠═══════════════════════════════════════════════════════════════════════════════╣\n")
 
 	// Compare clean runs (first iteration)
 	v1Clean := v1Results[0]
 	v2Clean := v2Results[0]
 
-	fmt.Printf("║  Clean Run Comparison:                                         ║\n")
-	fmt.Printf("║                                                                ║\n")
-	fmt.Printf("║  Download Time:                                                ║\n")
-	fmt.Printf("║    V1: %-54v ║\n", v1Clean.DownloadPhase.WallTime)
-	fmt.Printf("║    V2: %-54v ║\n", v2Clean.DownloadPhase.WallTime)
+	// === TIMING COMPARISON ===
+	fmt.Printf("║                                                                               ║\n")
+	fmt.Printf("║  ═══ TIMING METRICS ═══════════════════════════════════════════════════════   ║\n")
+	fmt.Printf("║                                                                               ║\n")
+	fmt.Printf("║  Download Time:                                                               ║\n")
+	fmt.Printf("║    V1: %-71v ║\n", v1Clean.DownloadPhase.WallTime)
+	fmt.Printf("║    V2: %-71v ║\n", v2Clean.DownloadPhase.WallTime)
 	if v1Clean.DownloadPhase.WallTime > 0 {
 		diff := float64(v1Clean.DownloadPhase.WallTime-v2Clean.DownloadPhase.WallTime) / float64(v1Clean.DownloadPhase.WallTime) * 100
-		fmt.Printf("║    V2 Improvement: %-46.2f%% ║\n", diff)
+		status := "faster"
+		if diff < 0 {
+			status = "slower"
+			diff = -diff
+		}
+		fmt.Printf("║    V2 is %.2f%% %s                                                          ║\n", diff, status)
 	}
 
-	fmt.Printf("║                                                                ║\n")
-	fmt.Printf("║  Upload Time:                                                  ║\n")
-	fmt.Printf("║    V1: %-54v ║\n", v1Clean.UploadPhase.WallTime)
-	fmt.Printf("║    V2: %-54v ║\n", v2Clean.UploadPhase.WallTime)
+	fmt.Printf("║                                                                               ║\n")
+	fmt.Printf("║  Upload Time:                                                                 ║\n")
+	fmt.Printf("║    V1: %-71v ║\n", v1Clean.UploadPhase.WallTime)
+	fmt.Printf("║    V2: %-71v ║\n", v2Clean.UploadPhase.WallTime)
 	if v1Clean.UploadPhase.WallTime > 0 {
 		diff := float64(v1Clean.UploadPhase.WallTime-v2Clean.UploadPhase.WallTime) / float64(v1Clean.UploadPhase.WallTime) * 100
-		fmt.Printf("║    V2 Improvement: %-46.2f%% ║\n", diff)
+		status := "faster"
+		if diff < 0 {
+			status = "slower"
+			diff = -diff
+		}
+		fmt.Printf("║    V2 is %.2f%% %s                                                          ║\n", diff, status)
 	}
 
-	fmt.Printf("║                                                                ║\n")
-	fmt.Printf("║  Cache Hits (Download):                                        ║\n")
-	fmt.Printf("║    V1: %-54d ║\n", v1Clean.DownloadPhase.CacheHits)
-	fmt.Printf("║    V2: %-54d ║\n", v2Clean.DownloadPhase.CacheHits)
+	totalV1 := v1Clean.DownloadPhase.WallTime + v1Clean.UploadPhase.WallTime
+	totalV2 := v2Clean.DownloadPhase.WallTime + v2Clean.UploadPhase.WallTime
+	fmt.Printf("║                                                                               ║\n")
+	fmt.Printf("║  Total Time:                                                                  ║\n")
+	fmt.Printf("║    V1: %-71v ║\n", totalV1)
+	fmt.Printf("║    V2: %-71v ║\n", totalV2)
 
-	fmt.Printf("║                                                                ║\n")
-	fmt.Printf("║  Bytes Uploaded:                                               ║\n")
-	fmt.Printf("║    V1: %-54d (%.2f MB) ║\n", v1Clean.UploadPhase.BytesUploaded, float64(v1Clean.UploadPhase.BytesUploaded)/(1024*1024))
-	fmt.Printf("║    V2: %-54d (%.2f MB) ║\n", v2Clean.UploadPhase.BytesUploaded, float64(v2Clean.UploadPhase.BytesUploaded)/(1024*1024))
+	// === DOWNLOAD SPEED COMPARISON ===
+	fmt.Printf("║                                                                               ║\n")
+	fmt.Printf("║  ═══ DOWNLOAD SPEED ═══════════════════════════════════════════════════════   ║\n")
+	fmt.Printf("║                                                                               ║\n")
+	fmt.Printf("║  Average Download Speed:                                                      ║\n")
+	fmt.Printf("║    V1: %.2f MB/s                                                              ║\n", v1Clean.DownloadPhase.DownloadMetrics.AverageSpeedMBs)
+	fmt.Printf("║    V2: %.2f MB/s                                                              ║\n", v2Clean.DownloadPhase.DownloadMetrics.AverageSpeedMBs)
+	fmt.Printf("║  Peak Download Speed:                                                         ║\n")
+	fmt.Printf("║    V1: %.2f MB/s                                                              ║\n", v1Clean.DownloadPhase.DownloadMetrics.PeakSpeedMBs)
+	fmt.Printf("║    V2: %.2f MB/s                                                              ║\n", v2Clean.DownloadPhase.DownloadMetrics.PeakSpeedMBs)
 
-	fmt.Printf("║                                                                ║\n")
-	fmt.Printf("║  Network Bandwidth:                                            ║\n")
-	fmt.Printf("║    V1 Avg: %-50.2f Mbps ║\n", v1Clean.NetworkMetrics.AverageBandwidthMbps)
-	fmt.Printf("║    V2 Avg: %-50.2f Mbps ║\n", v2Clean.NetworkMetrics.AverageBandwidthMbps)
-	fmt.Printf("║    V1 Peak: %-49.2f Mbps ║\n", v1Clean.NetworkMetrics.PeakBandwidthMbps)
-	fmt.Printf("║    V2 Peak: %-49.2f Mbps ║\n", v2Clean.NetworkMetrics.PeakBandwidthMbps)
+	// === RESOURCE USAGE COMPARISON ===
+	fmt.Printf("║                                                                               ║\n")
+	fmt.Printf("║  ═══ RESOURCE USAGE ═══════════════════════════════════════════════════════   ║\n")
+	fmt.Printf("║                                                                               ║\n")
+	fmt.Printf("║  CPU Usage (Average / Peak):                                                  ║\n")
+	fmt.Printf("║    V1: %.2f%% / %.2f%%                                                         ║\n",
+		v1Clean.ResourceMetrics.CPUAvgPercent, v1Clean.ResourceMetrics.CPUPeakPercent)
+	fmt.Printf("║    V2: %.2f%% / %.2f%%                                                         ║\n",
+		v2Clean.ResourceMetrics.CPUAvgPercent, v2Clean.ResourceMetrics.CPUPeakPercent)
+	fmt.Printf("║  Memory Usage (Average / Peak):                                               ║\n")
+	fmt.Printf("║    V1: %.2f MB / %.2f MB                                                      ║\n",
+		v1Clean.ResourceMetrics.MemoryAvgMB, v1Clean.ResourceMetrics.MemoryPeakMB)
+	fmt.Printf("║    V2: %.2f MB / %.2f MB                                                      ║\n",
+		v2Clean.ResourceMetrics.MemoryAvgMB, v2Clean.ResourceMetrics.MemoryPeakMB)
 
-	fmt.Printf("╚═══════════════════════════════════════════════════════════════╝\n")
+	// === NETWORK COMPARISON ===
+	fmt.Printf("║                                                                               ║\n")
+	fmt.Printf("║  ═══ NETWORK BANDWIDTH ════════════════════════════════════════════════════   ║\n")
+	fmt.Printf("║                                                                               ║\n")
+	fmt.Printf("║  Average Bandwidth:                                                           ║\n")
+	fmt.Printf("║    V1: %.2f Mbps                                                              ║\n", v1Clean.NetworkMetrics.AverageBandwidthMbps)
+	fmt.Printf("║    V2: %.2f Mbps                                                              ║\n", v2Clean.NetworkMetrics.AverageBandwidthMbps)
+	fmt.Printf("║  Peak Bandwidth:                                                              ║\n")
+	fmt.Printf("║    V1: %.2f Mbps                                                              ║\n", v1Clean.NetworkMetrics.PeakBandwidthMbps)
+	fmt.Printf("║    V2: %.2f Mbps                                                              ║\n", v2Clean.NetworkMetrics.PeakBandwidthMbps)
+
+	// === MIRROR CONTENT (from oc-mirror describe) ===
+	fmt.Printf("║                                                                               ║\n")
+	fmt.Printf("║  ═══ MIRROR CONTENT (oc-mirror describe) ══════════════════════════════════   ║\n")
+	fmt.Printf("║                                                                               ║\n")
+	if v1Clean.DescribeMetrics != nil && v2Clean.DescribeMetrics != nil {
+		fmt.Printf("║  Total Images:                                                                ║\n")
+		fmt.Printf("║    V1: %d                                                                     ║\n", v1Clean.DescribeMetrics.TotalImages)
+		fmt.Printf("║    V2: %d                                                                     ║\n", v2Clean.DescribeMetrics.TotalImages)
+		fmt.Printf("║  Total Layers:                                                                ║\n")
+		fmt.Printf("║    V1: %d                                                                     ║\n", v1Clean.DescribeMetrics.TotalLayers)
+		fmt.Printf("║    V2: %d                                                                     ║\n", v2Clean.DescribeMetrics.TotalLayers)
+		fmt.Printf("║  Total Manifests:                                                             ║\n")
+		fmt.Printf("║    V1: %d                                                                     ║\n", v1Clean.DescribeMetrics.TotalManifests)
+		fmt.Printf("║    V2: %d                                                                     ║\n", v2Clean.DescribeMetrics.TotalManifests)
+		fmt.Printf("║  Operator Packages:                                                           ║\n")
+		fmt.Printf("║    V1: %d                                                                     ║\n", v1Clean.DescribeMetrics.OperatorPackages)
+		fmt.Printf("║    V2: %d                                                                     ║\n", v2Clean.DescribeMetrics.OperatorPackages)
+		fmt.Printf("║  Total Associations:                                                          ║\n")
+		fmt.Printf("║    V1: %d                                                                     ║\n", v1Clean.DescribeMetrics.TotalAssociations)
+		fmt.Printf("║    V2: %d                                                                     ║\n", v2Clean.DescribeMetrics.TotalAssociations)
+	} else {
+		fmt.Printf("║  (oc-mirror describe metrics not available for comparison)                   ║\n")
+	}
+
+	// === ERROR/RETRY METRICS ===
+	fmt.Printf("║                                                                               ║\n")
+	fmt.Printf("║  ═══ ERROR/RETRY METRICS ══════════════════════════════════════════════════   ║\n")
+	fmt.Printf("║                                                                               ║\n")
+	fmt.Printf("║  Errors:                                                                      ║\n")
+	fmt.Printf("║    V1: %d                                                                     ║\n", v1Clean.DownloadPhase.ExtendedMetrics.ErrorCount+v1Clean.UploadPhase.ExtendedMetrics.ErrorCount)
+	fmt.Printf("║    V2: %d                                                                     ║\n", v2Clean.DownloadPhase.ExtendedMetrics.ErrorCount+v2Clean.UploadPhase.ExtendedMetrics.ErrorCount)
+	fmt.Printf("║  Retries:                                                                     ║\n")
+	fmt.Printf("║    V1: %d                                                                     ║\n", v1Clean.DownloadPhase.ExtendedMetrics.RetryCount+v1Clean.UploadPhase.ExtendedMetrics.RetryCount)
+	fmt.Printf("║    V2: %d                                                                     ║\n", v2Clean.DownloadPhase.ExtendedMetrics.RetryCount+v2Clean.UploadPhase.ExtendedMetrics.RetryCount)
+	fmt.Printf("║  Warnings:                                                                    ║\n")
+	fmt.Printf("║    V1: %d                                                                     ║\n", v1Clean.DownloadPhase.ExtendedMetrics.WarningCount+v1Clean.UploadPhase.ExtendedMetrics.WarningCount)
+	fmt.Printf("║    V2: %d                                                                     ║\n", v2Clean.DownloadPhase.ExtendedMetrics.WarningCount+v2Clean.UploadPhase.ExtendedMetrics.WarningCount)
+
+	// === OUTPUT SIZE COMPARISON ===
+	fmt.Printf("║                                                                               ║\n")
+	fmt.Printf("║  ═══ OUTPUT SIZE ══════════════════════════════════════════════════════════   ║\n")
+	fmt.Printf("║                                                                               ║\n")
+	fmt.Printf("║  Total Downloaded:                                                            ║\n")
+	fmt.Printf("║    V1: %s                                                                     ║\n", monitor.FormatBytesHuman(v1Clean.OutputMetrics.TotalSize))
+	fmt.Printf("║    V2: %s                                                                     ║\n", monitor.FormatBytesHuman(v2Clean.OutputMetrics.TotalSize))
+	fmt.Printf("║  Total Files:                                                                 ║\n")
+	fmt.Printf("║    V1: %d                                                                     ║\n", v1Clean.OutputMetrics.TotalFiles)
+	fmt.Printf("║    V2: %d                                                                     ║\n", v2Clean.OutputMetrics.TotalFiles)
+
+	// === OUTPUT VERIFICATION ===
+	fmt.Printf("║                                                                               ║\n")
+	fmt.Printf("║  ═══ OUTPUT VERIFICATION ══════════════════════════════════════════════════   ║\n")
+	fmt.Printf("║                                                                               ║\n")
+	comparison, err := monitor.CompareOutputs("mirror/operators-v1", "mirror/operators-v2")
+	if err != nil {
+		fmt.Printf("║  Could not compare outputs: %v                                               ║\n", err)
+	} else {
+		if comparison.Match {
+			fmt.Printf("║  ✓ V1 and V2 outputs are IDENTICAL                                           ║\n")
+		} else {
+			fmt.Printf("║  ✗ V1 and V2 outputs DIFFER                                                  ║\n")
+			fmt.Printf("║    Size difference: %s                                                       ║\n", monitor.FormatBytesHuman(comparison.SizeDifference))
+			fmt.Printf("║    File count difference: %d                                                 ║\n", comparison.FileCountDiff)
+			if len(comparison.MissingInFirst) > 0 {
+				fmt.Printf("║    Missing in V1: %d files                                                   ║\n", len(comparison.MissingInFirst))
+			}
+			if len(comparison.MissingInSecond) > 0 {
+				fmt.Printf("║    Missing in V2: %d files                                                   ║\n", len(comparison.MissingInSecond))
+			}
+			if len(comparison.DifferentContent) > 0 {
+				fmt.Printf("║    Different content: %d files                                               ║\n", len(comparison.DifferentContent))
+			}
+		}
+	}
+
+	// === CACHE EFFECTIVENESS (if we have cached runs) ===
+	if len(v1Results) > 1 && len(v2Results) > 1 {
+		fmt.Printf("║                                                                               ║\n")
+		fmt.Printf("║  ═══ CACHING EFFECTIVENESS ════════════════════════════════════════════════   ║\n")
+		fmt.Printf("║                                                                               ║\n")
+		v1Cached := v1Results[1]
+		v2Cached := v2Results[1]
+
+		v1CacheImprovement := float64(v1Clean.DownloadPhase.WallTime-v1Cached.DownloadPhase.WallTime) / float64(v1Clean.DownloadPhase.WallTime) * 100
+		v2CacheImprovement := float64(v2Clean.DownloadPhase.WallTime-v2Cached.DownloadPhase.WallTime) / float64(v2Clean.DownloadPhase.WallTime) * 100
+
+		fmt.Printf("║  Download Time Improvement (Clean vs Cached):                                 ║\n")
+		fmt.Printf("║    V1: %.2f%%                                                                 ║\n", v1CacheImprovement)
+		fmt.Printf("║    V2: %.2f%%                                                                 ║\n", v2CacheImprovement)
+		fmt.Printf("║  Cache Hits (Cached Run):                                                     ║\n")
+		fmt.Printf("║    V1: %d                                                                     ║\n", v1Cached.DownloadPhase.CacheHits)
+		fmt.Printf("║    V2: %d                                                                     ║\n", v2Cached.DownloadPhase.CacheHits)
+	}
+
+	fmt.Printf("║                                                                               ║\n")
+	fmt.Printf("╚═══════════════════════════════════════════════════════════════════════════════╝\n")
 }
 
 func (tr *TestRunner) generateSummary(result TestResult) string {
@@ -560,7 +819,7 @@ func (tr *TestRunner) generateSummary(result TestResult) string {
 
 func (tr *TestRunner) saveResults() error {
 	resultsPath := filepath.Join("results", fmt.Sprintf("results_%s.json", time.Now().Format("20060102_150405")))
-	
+
 	data, err := json.MarshalIndent(tr.results, "", "  ")
 	if err != nil {
 		return err

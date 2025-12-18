@@ -1,0 +1,286 @@
+package monitor
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+)
+
+// OutputVerifier verifies and compares mirror output directories
+type OutputVerifier struct {
+	directory string
+}
+
+// OutputMetrics contains metrics about the output directory
+type OutputMetrics struct {
+	TotalSize       int64
+	TotalFiles      int
+	TotalDirs       int
+	DirectoryHash   string            // Combined hash of all file hashes
+	FileHashes      map[string]string // Individual file hashes
+	LargestFiles    []FileInfo        // Top 10 largest files
+	FileTypes       map[string]int    // Count by extension
+	LayerCount      int               // Number of blob layers
+	ManifestCount   int               // Number of manifests
+	SignatureCount  int               // Number of signatures
+}
+
+// FileInfo contains information about a single file
+type FileInfo struct {
+	Path string
+	Size int64
+	Hash string
+}
+
+// ComparisonResult contains the comparison between two outputs
+type OutputComparisonResult struct {
+	Match            bool
+	SizeDifference   int64
+	FileCountDiff    int
+	MissingInFirst   []string
+	MissingInSecond  []string
+	DifferentContent []string
+	HashMatch        bool
+}
+
+// NewOutputVerifier creates a new output verifier for the given directory
+func NewOutputVerifier(directory string) *OutputVerifier {
+	return &OutputVerifier{
+		directory: directory,
+	}
+}
+
+// Analyze analyzes the output directory and returns metrics
+func (ov *OutputVerifier) Analyze() (OutputMetrics, error) {
+	metrics := OutputMetrics{
+		FileHashes:   make(map[string]string),
+		LargestFiles: make([]FileInfo, 0),
+		FileTypes:    make(map[string]int),
+	}
+
+	var allHashes []string
+	var allFiles []FileInfo
+
+	err := filepath.Walk(ov.directory, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // Skip files we can't access
+		}
+
+		relPath, _ := filepath.Rel(ov.directory, path)
+
+		if info.IsDir() {
+			metrics.TotalDirs++
+			return nil
+		}
+
+		metrics.TotalFiles++
+		metrics.TotalSize += info.Size()
+
+		// Count file types
+		ext := strings.ToLower(filepath.Ext(path))
+		if ext == "" {
+			ext = "(no extension)"
+		}
+		metrics.FileTypes[ext]++
+
+		// Identify content types
+		if strings.Contains(path, "/blobs/") {
+			metrics.LayerCount++
+		}
+		if strings.Contains(path, "manifest") || strings.HasSuffix(path, ".json") {
+			metrics.ManifestCount++
+		}
+		if strings.Contains(path, "signature") || strings.HasSuffix(path, ".sig") {
+			metrics.SignatureCount++
+		}
+
+		// Calculate file hash (for smaller files, skip very large ones for performance)
+		var hash string
+		if info.Size() < 100*1024*1024 { // Only hash files < 100MB
+			hash, _ = hashFile(path)
+			if hash != "" {
+				metrics.FileHashes[relPath] = hash
+				allHashes = append(allHashes, hash)
+			}
+		} else {
+			// For large files, use size + name as pseudo-hash
+			hash = fmt.Sprintf("size:%d", info.Size())
+			metrics.FileHashes[relPath] = hash
+			allHashes = append(allHashes, hash)
+		}
+
+		allFiles = append(allFiles, FileInfo{
+			Path: relPath,
+			Size: info.Size(),
+			Hash: hash,
+		})
+
+		return nil
+	})
+
+	if err != nil {
+		return metrics, err
+	}
+
+	// Sort to get largest files
+	sort.Slice(allFiles, func(i, j int) bool {
+		return allFiles[i].Size > allFiles[j].Size
+	})
+
+	// Keep top 10 largest
+	if len(allFiles) > 10 {
+		metrics.LargestFiles = allFiles[:10]
+	} else {
+		metrics.LargestFiles = allFiles
+	}
+
+	// Calculate combined directory hash
+	sort.Strings(allHashes)
+	combinedHash := sha256.New()
+	for _, h := range allHashes {
+		combinedHash.Write([]byte(h))
+	}
+	metrics.DirectoryHash = hex.EncodeToString(combinedHash.Sum(nil))
+
+	return metrics, nil
+}
+
+// Compare compares two output directories
+func CompareOutputs(dir1, dir2 string) (OutputComparisonResult, error) {
+	result := OutputComparisonResult{
+		MissingInFirst:   make([]string, 0),
+		MissingInSecond:  make([]string, 0),
+		DifferentContent: make([]string, 0),
+	}
+
+	verifier1 := NewOutputVerifier(dir1)
+	verifier2 := NewOutputVerifier(dir2)
+
+	metrics1, err := verifier1.Analyze()
+	if err != nil {
+		return result, fmt.Errorf("failed to analyze %s: %w", dir1, err)
+	}
+
+	metrics2, err := verifier2.Analyze()
+	if err != nil {
+		return result, fmt.Errorf("failed to analyze %s: %w", dir2, err)
+	}
+
+	result.SizeDifference = metrics1.TotalSize - metrics2.TotalSize
+	result.FileCountDiff = metrics1.TotalFiles - metrics2.TotalFiles
+	result.HashMatch = metrics1.DirectoryHash == metrics2.DirectoryHash
+
+	// Find missing files
+	for path := range metrics1.FileHashes {
+		if _, exists := metrics2.FileHashes[path]; !exists {
+			result.MissingInSecond = append(result.MissingInSecond, path)
+		}
+	}
+
+	for path := range metrics2.FileHashes {
+		if _, exists := metrics1.FileHashes[path]; !exists {
+			result.MissingInFirst = append(result.MissingInFirst, path)
+		}
+	}
+
+	// Find files with different content
+	for path, hash1 := range metrics1.FileHashes {
+		if hash2, exists := metrics2.FileHashes[path]; exists {
+			if hash1 != hash2 {
+				result.DifferentContent = append(result.DifferentContent, path)
+			}
+		}
+	}
+
+	result.Match = result.HashMatch &&
+		len(result.MissingInFirst) == 0 &&
+		len(result.MissingInSecond) == 0 &&
+		len(result.DifferentContent) == 0
+
+	return result, nil
+}
+
+func hashFile(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+// PrintSummary prints a formatted summary of the output metrics
+func (m *OutputMetrics) PrintSummary() {
+	fmt.Printf("  │ ─── Output Analysis ──────────────────────────────────────────\n")
+	fmt.Printf("  │   Total Size: %s\n", FormatBytesHuman(m.TotalSize))
+	fmt.Printf("  │   Total Files: %d | Directories: %d\n", m.TotalFiles, m.TotalDirs)
+	fmt.Printf("  │   Layers/Blobs: %d | Manifests: %d | Signatures: %d\n",
+		m.LayerCount, m.ManifestCount, m.SignatureCount)
+	fmt.Printf("  │   Directory Hash: %s...\n", m.DirectoryHash[:16])
+
+	if len(m.LargestFiles) > 0 {
+		fmt.Printf("  │   Largest Files:\n")
+		for i, f := range m.LargestFiles {
+			if i >= 5 {
+				break
+			}
+			fmt.Printf("  │     %d. %s (%s)\n", i+1, truncatePath(f.Path, 40), FormatBytesHuman(f.Size))
+		}
+	}
+}
+
+// PrintComparisonSummary prints a comparison between two outputs
+func (r *OutputComparisonResult) PrintSummary(name1, name2 string) {
+	fmt.Printf("  │ ─── Output Comparison (%s vs %s) ─────────────────────\n", name1, name2)
+	if r.Match {
+		fmt.Printf("  │   ✓ Outputs MATCH\n")
+	} else {
+		fmt.Printf("  │   ✗ Outputs DIFFER\n")
+	}
+	fmt.Printf("  │   Size Difference: %s\n", FormatBytesHuman(abs(r.SizeDifference)))
+	fmt.Printf("  │   File Count Difference: %d\n", abs64(int64(r.FileCountDiff)))
+	fmt.Printf("  │   Hash Match: %v\n", r.HashMatch)
+
+	if len(r.MissingInFirst) > 0 {
+		fmt.Printf("  │   Missing in %s: %d files\n", name1, len(r.MissingInFirst))
+	}
+	if len(r.MissingInSecond) > 0 {
+		fmt.Printf("  │   Missing in %s: %d files\n", name2, len(r.MissingInSecond))
+	}
+	if len(r.DifferentContent) > 0 {
+		fmt.Printf("  │   Different Content: %d files\n", len(r.DifferentContent))
+	}
+}
+
+func truncatePath(path string, maxLen int) string {
+	if len(path) <= maxLen {
+		return path
+	}
+	return "..." + path[len(path)-maxLen+3:]
+}
+
+func abs(n int64) int64 {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
+func abs64(n int64) int64 {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+

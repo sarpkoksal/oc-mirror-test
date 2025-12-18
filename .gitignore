@@ -23,6 +23,7 @@ go.work
 
 # Generated directories and test artifacts
 oc-mirror-clone/
+oc-mirror-workspace/
 mirror/
 platform/
 operators/

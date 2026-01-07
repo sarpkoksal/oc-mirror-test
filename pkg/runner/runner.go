@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,14 +10,47 @@ import (
 	"time"
 
 	"github.com/telco-core/ngc-495/internal/config"
+	"github.com/telco-core/ngc-495/pkg/client"
 	"github.com/telco-core/ngc-495/pkg/command"
 	"github.com/telco-core/ngc-495/pkg/monitor"
 )
 
 // TestRunner orchestrates test execution
 type TestRunner struct {
-	config  *Config
-	results []TestResult
+	config          *Config
+	results         []TestResult
+	resultsPath     string                   // Path to the results file for this test run
+	registryMonitor *monitor.RegistryMonitor // Daemon monitor for registry uploads
+}
+
+// RegistryMonitorInterface defines the interface for accessing registry monitor
+type RegistryMonitorInterface interface {
+	IsMonitoring() bool
+	GetCurrentMetrics() interface{}
+}
+
+// GetRegistryMonitor returns the registry monitor instance for external access
+func (tr *TestRunner) GetRegistryMonitor() RegistryMonitorInterface {
+	return &registryMonitorWrapper{rm: tr.registryMonitor}
+}
+
+// registryMonitorWrapper wraps RegistryMonitor to implement the interface
+type registryMonitorWrapper struct {
+	rm *monitor.RegistryMonitor
+}
+
+func (w *registryMonitorWrapper) IsMonitoring() bool {
+	if w.rm == nil {
+		return false
+	}
+	return w.rm.IsMonitoring()
+}
+
+func (w *registryMonitorWrapper) GetCurrentMetrics() interface{} {
+	if w.rm == nil {
+		return nil
+	}
+	return w.rm.GetCurrentMetrics()
 }
 
 // NewTestRunner creates a new test runner
@@ -24,10 +58,35 @@ func NewTestRunner(cfg *Config) *TestRunner {
 	if cfg.Iterations < 2 {
 		cfg.Iterations = 2
 	}
+	// Initialize results file path with timestamp
+	resultsPath := filepath.Join("results", fmt.Sprintf("results_%s.json", time.Now().Format("20060102_150405")))
+
+	// Extract registry host:port for monitoring
+	registryAddr := extractRegistryAddress(cfg.RegistryURL)
+
 	return &TestRunner{
-		config:  cfg,
-		results: make([]TestResult, 0),
+		config:          cfg,
+		results:         make([]TestResult, 0),
+		resultsPath:     resultsPath,
+		registryMonitor: monitor.NewRegistryMonitor(registryAddr),
 	}
+}
+
+// extractRegistryAddress extracts host:port from registry URL
+func extractRegistryAddress(registryURL string) string {
+	// Remove docker:// prefix if present
+	addr := strings.TrimPrefix(registryURL, "docker://")
+	// Remove trailing slashes and paths
+	addr = strings.TrimRight(addr, "/")
+	// Extract just host:port (remove path if present)
+	if idx := strings.Index(addr, "/"); idx > 0 {
+		addr = addr[:idx]
+	}
+	// Ensure port is present
+	if !strings.Contains(addr, ":") {
+		addr = addr + ":5000" // Default registry port
+	}
+	return addr
 }
 
 // Run executes all test iterations
@@ -41,6 +100,43 @@ func (tr *TestRunner) Run() error {
 		fmt.Printf("V1/V2 Comparison: Enabled\n")
 	}
 	fmt.Printf("\n")
+
+	// Ensure required tools are available
+	fmt.Printf("Checking for required tools (oc-mirror)...\n")
+	ctx := context.Background()
+	binDir := "./bin"
+	if err := client.EnsureTools(ctx, binDir, []string{"oc-mirror"}); err != nil {
+		fmt.Printf("Warning: Failed to ensure tools are available: %v\n", err)
+		fmt.Printf("Please ensure oc-mirror is in PATH or run: oc-mirror-test download\n")
+	}
+
+	// Update PATH to include bin directory for downloaded binaries
+	if err := tr.updatePathWithBinDir(binDir); err != nil {
+		fmt.Printf("Warning: Failed to update PATH: %v\n", err)
+	} else {
+		fmt.Printf("Updated PATH to include: %s\n", binDir)
+	}
+
+	// Start registry monitoring daemon
+	registryAddr := extractRegistryAddress(tr.config.RegistryURL)
+	fmt.Printf("Starting registry upload monitor daemon for %s...\n", registryAddr)
+	tr.registryMonitor = monitor.NewRegistryMonitor(registryAddr)
+	tr.registryMonitor.SetPollInterval(1 * time.Second)
+	if err := tr.registryMonitor.Start(); err != nil {
+		fmt.Printf("Warning: Failed to start registry monitor: %v\n", err)
+	} else {
+		fmt.Printf("Registry monitor daemon started (monitoring uploads to %s)\n", registryAddr)
+		// Ensure monitor is stopped when tests complete
+		defer func() {
+			if tr.registryMonitor != nil && tr.registryMonitor.IsMonitoring() {
+				metrics := tr.registryMonitor.Stop()
+				fmt.Printf("\nRegistry Monitor Summary:\n")
+				fmt.Printf("  Total Bytes Uploaded: %s\n", monitor.FormatBytesHuman(metrics.TotalBytesUploaded))
+				fmt.Printf("  Average Upload Rate: %.2f MB/s\n", metrics.AverageUploadRateMB)
+				fmt.Printf("  Peak Upload Rate: %.2f MB/s\n", metrics.PeakUploadRateMB)
+			}
+		}()
+	}
 
 	// Create necessary directories
 	if err := tr.setupDirectories(); err != nil {
@@ -82,12 +178,17 @@ func (tr *TestRunner) runStandardTest() error {
 
 		tr.results = append(tr.results, result)
 		tr.printIterationSummary(result)
+
+		// Save results incrementally after each iteration
+		if err := tr.saveResults(); err != nil {
+			fmt.Printf("Warning: Failed to save results incrementally: %v\n", err)
+		}
 	}
 
 	// Compare results
 	tr.compareCleanVsCached()
 
-	// Save results to JSON
+	// Final save (in case of any updates)
 	if err := tr.saveResults(); err != nil {
 		return fmt.Errorf("failed to save results: %w", err)
 	}
@@ -114,6 +215,12 @@ func (tr *TestRunner) runV1V2Comparison() error {
 			return fmt.Errorf("v1 iteration %d failed: %w", i+1, err)
 		}
 		v1Results = append(v1Results, result)
+
+		// Save results incrementally after each v1 iteration
+		tr.results = v1Results
+		if err := tr.saveResults(); err != nil {
+			fmt.Printf("Warning: Failed to save results incrementally: %v\n", err)
+		}
 	}
 
 	// Clean workspace for v2
@@ -138,6 +245,12 @@ func (tr *TestRunner) runV1V2Comparison() error {
 			return fmt.Errorf("v2 iteration %d failed: %w", i+1, err)
 		}
 		v2Results = append(v2Results, result)
+
+		// Save results incrementally after each v2 iteration (include both v1 and v2)
+		tr.results = append(v1Results, v2Results...)
+		if err := tr.saveResults(); err != nil {
+			fmt.Printf("Warning: Failed to save results incrementally: %v\n", err)
+		}
 	}
 
 	// Store all results
@@ -146,7 +259,7 @@ func (tr *TestRunner) runV1V2Comparison() error {
 	// Compare v1 vs v2
 	tr.compareV1VsV2(v1Results, v2Results)
 
-	// Save results to JSON
+	// Final save (in case of any updates)
 	if err := tr.saveResults(); err != nil {
 		return fmt.Errorf("failed to save results: %w", err)
 	}
@@ -162,10 +275,9 @@ func (tr *TestRunner) setupDirectories() error {
 		"mirror/operators-v2",
 		"platform",
 		"platform/mirror",
-		"operators",    // v2 cache directory
-		"operators-v1", // v1 cache directory
-		"operators-v2", // v2 cache directory
 		"results",
+		// Note: Cache directories (operators, operators-v1, operators-v2) are created
+		// automatically by oc-mirror when needed, so we don't pre-create them
 	}
 
 	for _, dir := range dirs {
@@ -233,6 +345,17 @@ func (tr *TestRunner) runIteration(iterationNum int, isCleanRun bool, version st
 		return result, fmt.Errorf("upload phase failed: %w", err)
 	}
 	result.UploadPhase = uploadMetrics
+
+	// Get registry upload metrics from daemon
+	if tr.registryMonitor != nil && tr.registryMonitor.IsMonitoring() {
+		registryMetrics := tr.registryMonitor.GetCurrentMetrics()
+		result.RegistryMetrics = &registryMetrics
+		fmt.Printf("  │ Registry Upload: %s | Avg: %.2f MB/s | Peak: %.2f MB/s\n",
+			monitor.FormatBytesHuman(registryMetrics.TotalBytesUploaded),
+			registryMetrics.AverageUploadRateMB,
+			registryMetrics.PeakUploadRateMB)
+	}
+
 	fmt.Printf("  └─────────────────────────────────────────────────────────────┘\n")
 
 	// Stop upload network monitoring
@@ -243,6 +366,12 @@ func (tr *TestRunner) runIteration(iterationNum int, isCleanRun bool, version st
 		result.NetworkMetrics.PeakBandwidthMbps = uploadNetworkMetrics.PeakBandwidthMbps
 	}
 	result.NetworkMetrics.AverageBandwidthMbps = (result.NetworkMetrics.AverageBandwidthMbps + uploadNetworkMetrics.AverageBandwidthMbps) / 2
+
+	// Get registry upload metrics from daemon (captured during upload phase)
+	if tr.registryMonitor != nil && tr.registryMonitor.IsMonitoring() {
+		registryMetrics := tr.registryMonitor.GetCurrentMetrics()
+		result.RegistryMetrics = &registryMetrics
+	}
 
 	// Stop overall resource monitoring
 	result.ResourceMetrics = overallResourceMonitor.Stop()
@@ -424,11 +553,36 @@ func (tr *TestRunner) runDownloadPhase(isCleanRun bool, version string) (PhaseMe
 func (tr *TestRunner) runUploadPhase(version string) (PhaseMetrics, error) {
 	metrics := PhaseMetrics{}
 
-	// Ensure registry URL has a scheme prefix
-	registryURL := tr.config.RegistryURL
-	if !strings.Contains(registryURL, "://") {
-		// Default to docker:// if no scheme is provided
-		registryURL = "docker://" + registryURL
+	// Normalize registry URL: remove trailing slashes and ensure proper format
+	registryURL := strings.TrimRight(tr.config.RegistryURL, "/")
+
+	// For v1, oc-mirror requires docker:// prefix with scheme delimiter
+	// For v2, keep docker:// prefix if present
+	var normalizedURL string
+	if version == "v1" {
+		// v1: ensure docker:// prefix is present (required for scheme delimiter)
+		if !strings.Contains(registryURL, "://") {
+			normalizedURL = "docker://" + registryURL
+		} else {
+			normalizedURL = registryURL
+		}
+		// Remove trailing path components that might cause issues
+		// v1 seems to prefer just host:port format
+		if strings.Count(normalizedURL, "/") > 2 {
+			// docker://host:port/path -> try to simplify
+			parts := strings.SplitN(normalizedURL, "://", 2)
+			if len(parts) == 2 {
+				hostPort := strings.Split(parts[1], "/")[0]
+				normalizedURL = parts[0] + "://" + hostPort
+			}
+		}
+	} else {
+		// v2: ensure docker:// prefix is present
+		if !strings.Contains(registryURL, "://") {
+			normalizedURL = "docker://" + registryURL
+		} else {
+			normalizedURL = registryURL
+		}
 	}
 
 	// Prepare resource monitor for oc-mirror process (will be started when we get the PID)
@@ -439,21 +593,23 @@ func (tr *TestRunner) runUploadPhase(version string) (PhaseMetrics, error) {
 	cmd.SetV2(version == "v2")
 	cmd.SetSkipTLS(tr.config.SkipTLS)
 
+	var platformConfigPath string
 	if version == "v1" {
 		// v1: Use platform config with --from flag to upload from local mirror
-		platformConfigPath := "platform/platform_config-v1.yaml"
+		platformConfigPath = "platform/platform_config-v1.yaml"
 		if err := config.CreatePlatformConfigWithVersion(platformConfigPath, "v1alpha2"); err != nil {
 			return metrics, fmt.Errorf("failed to create platform config: %w", err)
 		}
 		cmd.SetConfig(platformConfigPath)
 		cmd.SetFrom("mirror/operators-v1/")
-		cmd.SetOutput(registryURL)
+		cmd.SetOutput(normalizedURL)
 	} else {
 		// v2: Use original imageset config with --cache-dir, output directly to registry
-		// Command: oc-mirror --v2 --cache-dir operators-v2 -c <config> --dest-tls-verify=false docker://registry
+		// Command: oc-mirror --v2 --cache-dir operators-v2 -c <config> --workspace file://./mirror/operators-v2/ --dest-tls-verify=false docker://registry
 		cmd.SetConfig("oc-mirror-clone/imagesetconfiguration_operators-v2.yaml")
 		cmd.SetCacheDir("operators-v2")
-		cmd.SetOutput(registryURL)
+		cmd.SetWorkspace("file://./mirror/operators-v2/")
+		cmd.SetOutput(normalizedURL)
 		// Note: v2 does NOT use --from flag
 	}
 
@@ -478,6 +634,48 @@ func (tr *TestRunner) runUploadPhase(version string) (PhaseMetrics, error) {
 	// Extract extended metrics from logs
 	extendedMetrics := output.ExtractExtendedMetrics()
 	metrics.ExtendedMetrics = extendedMetrics
+
+	// If upload failed with invalid reference format or scheme delimiter, try fallback
+	if err != nil && (strings.Contains(err.Error(), "invalid reference format") ||
+		strings.Contains(err.Error(), "no scheme delimiter")) && version == "v1" {
+		// Try fallback: ensure proper docker://host:port format
+		fallbackURL := normalizedURL
+		// Remove any path components, keep only scheme://host:port
+		if strings.Contains(fallbackURL, "://") {
+			parts := strings.SplitN(fallbackURL, "://", 2)
+			if len(parts) == 2 {
+				hostPort := strings.Split(parts[1], "/")[0]
+				fallbackURL = parts[0] + "://" + hostPort
+				fmt.Printf("  │ Retrying with fallback registry URL: %s\n", fallbackURL)
+
+				// Create new command with fallback URL
+				cmdFallback := command.NewOCMirrorCommand()
+				cmdFallback.SetV2(false)
+				cmdFallback.SetSkipTLS(tr.config.SkipTLS)
+				cmdFallback.SetConfig(platformConfigPath)
+				cmdFallback.SetFrom("mirror/operators-v1/")
+				cmdFallback.SetOutput(fallbackURL)
+
+				// Retry with fallback URL
+				startTime = time.Now()
+				output, err = cmdFallback.ExecuteWithCallback(func(pid int) {
+					resourceMonitor.SetTargetPID(pid)
+					if startErr := resourceMonitor.Start(); startErr != nil {
+						fmt.Printf("  │ Warning: Failed to start resource monitoring for oc-mirror (PID %d): %v\n", pid, startErr)
+					} else {
+						fmt.Printf("  │ Monitoring oc-mirror process (PID: %d)\n", pid)
+					}
+				})
+				metrics.WallTime = time.Since(startTime)
+
+				// Update metrics after retry
+				resourceMetrics = resourceMonitor.Stop()
+				metrics.ResourceMetrics = resourceMetrics
+				extendedMetrics = output.ExtractExtendedMetrics()
+				metrics.ExtendedMetrics = extendedMetrics
+			}
+		}
+	}
 
 	if err != nil {
 		// Still show metrics on error
@@ -818,12 +1016,59 @@ func (tr *TestRunner) generateSummary(result TestResult) string {
 }
 
 func (tr *TestRunner) saveResults() error {
-	resultsPath := filepath.Join("results", fmt.Sprintf("results_%s.json", time.Now().Format("20060102_150405")))
+	// Use the same results file path throughout the test run
+	if tr.resultsPath == "" {
+		tr.resultsPath = filepath.Join("results", fmt.Sprintf("results_%s.json", time.Now().Format("20060102_150405")))
+	}
+
+	// Ensure results directory exists
+	if err := os.MkdirAll("results", 0755); err != nil {
+		return fmt.Errorf("failed to create results directory: %w", err)
+	}
 
 	data, err := json.MarshalIndent(tr.results, "", "  ")
 	if err != nil {
 		return err
 	}
 
-	return os.WriteFile(resultsPath, data, 0644)
+	// Write atomically using a temporary file
+	tmpPath := tr.resultsPath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return err
+	}
+
+	// Atomic rename
+	if err := os.Rename(tmpPath, tr.resultsPath); err != nil {
+		os.Remove(tmpPath) // Clean up on error
+		return err
+	}
+
+	return nil
+}
+
+// updatePathWithBinDir updates the PATH environment variable to include the bin directory
+func (tr *TestRunner) updatePathWithBinDir(binDir string) error {
+	absBinPath, err := filepath.Abs(binDir)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path for bin directory: %w", err)
+	}
+
+	currentPath := os.Getenv("PATH")
+	if currentPath == "" {
+		// If PATH is empty, just set it to the bin directory
+		return os.Setenv("PATH", absBinPath)
+	}
+
+	// Check if bin directory is already in PATH
+	pathDirs := strings.Split(currentPath, string(os.PathListSeparator))
+	for _, dir := range pathDirs {
+		if dir == absBinPath {
+			// Already in PATH, no need to update
+			return nil
+		}
+	}
+
+	// Prepend bin directory to PATH
+	newPath := absBinPath + string(os.PathListSeparator) + currentPath
+	return os.Setenv("PATH", newPath)
 }

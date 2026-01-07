@@ -1,6 +1,7 @@
 package monitor
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"sync"
@@ -20,20 +21,20 @@ type DiskWriteMonitor struct {
 
 // DiskWriteSample represents a single disk write measurement
 type DiskWriteSample struct {
-	Timestamp  time.Time
-	TotalBytes int64
-	FileCount  int
-	WriteRate  float64 // MB/s
+	Timestamp  time.Time `json:"Timestamp"`
+	TotalBytes int64     `json:"TotalBytes"`
+	FileCount  int       `json:"FileCount"`
+	WriteRate  float64   `json:"WriteRate"` // MB/s
 }
 
 // DiskWriteMetrics represents aggregated disk write metrics
 type DiskWriteMetrics struct {
-	TotalBytesWritten   int64
-	TotalFiles          int
-	Duration            time.Duration
-	AverageWriteRateMBs float64
-	PeakWriteRateMBs    float64
-	Samples             []DiskWriteSample
+	TotalBytesWritten   int64              `json:"TotalBytesWritten"`
+	TotalFiles          int                `json:"TotalFiles"`
+	Duration            time.Duration      `json:"Duration"`
+	AverageWriteRateMBs float64            `json:"AverageWriteRateMBs"`
+	PeakWriteRateMBs    float64            `json:"PeakWriteRateMBs"`
+	Samples             []DiskWriteSample  `json:"Samples"`
 }
 
 // NewDiskWriteMonitor creates a new disk write monitor for the specified directory
@@ -76,8 +77,10 @@ func (dm *DiskWriteMonitor) Stop() DiskWriteMetrics {
 	dm.stopTime = time.Now()
 	dm.mu.Unlock()
 
-	// Wait a bit for last sample
-	time.Sleep(500 * time.Millisecond)
+	// Use context timeout instead of blocking sleep
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	<-ctx.Done()
+	cancel()
 
 	return dm.calculateMetrics()
 }
@@ -87,6 +90,26 @@ func (dm *DiskWriteMonitor) IsMonitoring() bool {
 	dm.mu.RLock()
 	defer dm.mu.RUnlock()
 	return dm.monitoring
+}
+
+// StopInterface implements Monitor interface
+func (dm *DiskWriteMonitor) StopInterface() interface{} {
+	return dm.Stop()
+}
+
+// GetDuration implements Monitor interface
+func (dm *DiskWriteMonitor) GetDuration() time.Duration {
+	dm.mu.RLock()
+	defer dm.mu.RUnlock()
+	if !dm.monitoring {
+		return dm.stopTime.Sub(dm.startTime)
+	}
+	return time.Since(dm.startTime)
+}
+
+// GetPollInterval implements PollingMonitor interface
+func (dm *DiskWriteMonitor) GetPollInterval() time.Duration {
+	return dm.pollInterval
 }
 
 // GetCurrentStats returns the current statistics without stopping the monitor

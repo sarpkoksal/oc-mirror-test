@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -81,6 +83,13 @@ type DescribeMetrics struct {
 func DescribeMirror(mirrorPath string) (*DescribeMetrics, error) {
 	// Run oc-mirror describe
 	cmd := exec.Command("oc-mirror", "describe", mirrorPath)
+
+	// Set PATH to include ./bin directory for downloaded binaries
+	binDir, pathErr := getBinDirectory()
+	if pathErr == nil {
+		binPath := filepath.Join(binDir, "bin")
+		cmd.Env = updateCommandEnv(os.Environ(), binPath)
+	}
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

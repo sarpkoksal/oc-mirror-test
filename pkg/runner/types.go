@@ -18,6 +18,7 @@ type TestResult struct {
 	ResourceMetrics monitor.ResourceMetrics  `json:"resource_metrics"`
 	OutputMetrics   monitor.OutputMetrics    `json:"output_metrics"`
 	DescribeMetrics *command.DescribeMetrics `json:"describe_metrics,omitempty"`
+	RegistryMetrics *monitor.RegistryMetrics `json:"registry_metrics,omitempty"` // Registry upload metrics
 	Summary         string                   `json:"summary"`
 }
 

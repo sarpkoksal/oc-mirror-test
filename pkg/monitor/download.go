@@ -1,6 +1,7 @@
 package monitor
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,33 +25,33 @@ type DownloadMonitor struct {
 
 // DownloadSample represents a single download measurement
 type DownloadSample struct {
-	Timestamp      time.Time
-	TotalBytes     int64
-	BytesDelta     int64   // Bytes downloaded since last sample
-	DownloadRateMB float64 // Download rate in MB/s
-	FileCount      int
+	Timestamp      time.Time `json:"Timestamp"`
+	TotalBytes     int64     `json:"TotalBytes"`
+	BytesDelta     int64     `json:"BytesDelta"`     // Bytes downloaded since last sample
+	DownloadRateMB float64   `json:"DownloadRateMB"` // Download rate in MB/s
+	FileCount      int       `json:"FileCount"`
 }
 
 // DownloadProgress represents real-time progress for display
 type DownloadProgress struct {
-	ElapsedTime       time.Duration
-	TotalBytes        int64
-	CurrentRateMBs    float64
-	AverageRateMBs    float64
-	FileCount         int
+	ElapsedTime    time.Duration `json:"ElapsedTime"`
+	TotalBytes     int64         `json:"TotalBytes"`
+	CurrentRateMBs float64        `json:"CurrentRateMBs"`
+	AverageRateMBs float64       `json:"AverageRateMBs"`
+	FileCount      int           `json:"FileCount"`
 }
 
 // DownloadMetrics represents the final download metrics
 type DownloadMetrics struct {
-	TotalBytesDownloaded int64
-	TotalFiles           int
-	Duration             time.Duration
-	AverageSpeedMBs      float64
-	PeakSpeedMBs         float64
-	MinSpeedMBs          float64
-	Samples              []DownloadSample
-	StartTime            time.Time
-	EndTime              time.Time
+	TotalBytesDownloaded int64            `json:"TotalBytesDownloaded"`
+	TotalFiles           int               `json:"TotalFiles"`
+	Duration             time.Duration     `json:"Duration"`
+	AverageSpeedMBs      float64           `json:"AverageSpeedMBs"`
+	PeakSpeedMBs         float64           `json:"PeakSpeedMBs"`
+	MinSpeedMBs          float64           `json:"MinSpeedMBs"`
+	Samples              []DownloadSample  `json:"Samples"`
+	StartTime            time.Time         `json:"StartTime"`
+	EndTime              time.Time         `json:"EndTime"`
 }
 
 // NewDownloadMonitor creates a new download monitor for the specified directory
@@ -120,17 +121,39 @@ func (dm *DownloadMonitor) Stop() DownloadMetrics {
 	}
 	dm.mu.Unlock()
 
-	// Wait a bit for last sample
-	time.Sleep(500 * time.Millisecond)
+	// Wait a bit for last sample (use context with timeout for better control)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	<-ctx.Done()
+	cancel()
 
 	return dm.calculateMetrics()
 }
 
-// IsMonitoring returns whether the monitor is currently active
+// StopInterface implements Monitor interface
+func (dm *DownloadMonitor) StopInterface() interface{} {
+	return dm.Stop()
+}
+
+// IsMonitoring implements Monitor interface
 func (dm *DownloadMonitor) IsMonitoring() bool {
 	dm.mu.RLock()
 	defer dm.mu.RUnlock()
 	return dm.monitoring
+}
+
+// GetDuration implements Monitor interface
+func (dm *DownloadMonitor) GetDuration() time.Duration {
+	dm.mu.RLock()
+	defer dm.mu.RUnlock()
+	if !dm.monitoring {
+		return dm.stopTime.Sub(dm.startTime)
+	}
+	return time.Since(dm.startTime)
+}
+
+// GetPollInterval implements PollingMonitor interface
+func (dm *DownloadMonitor) GetPollInterval() time.Duration {
+	return dm.pollInterval
 }
 
 func (dm *DownloadMonitor) monitorLoop() {
@@ -151,9 +174,8 @@ func (dm *DownloadMonitor) monitorLoop() {
 
 		select {
 		case <-ticker.C:
-			currentBytes := dm.getDirectorySize()
+			currentBytes, fileCount := dm.getDirectoryStats()
 			currentTime := time.Now()
-			fileCount := dm.getFileCount()
 
 			bytesDelta := currentBytes - lastBytes
 			elapsed := currentTime.Sub(lastSampleTime).Seconds()
@@ -204,35 +226,28 @@ func (dm *DownloadMonitor) monitorLoop() {
 	}
 }
 
-func (dm *DownloadMonitor) getDirectorySize() int64 {
-	var totalSize int64
-
+// getDirectoryStats efficiently gets both size and count in a single walk
+func (dm *DownloadMonitor) getDirectoryStats() (size int64, count int) {
 	filepath.Walk(dm.targetDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
 		}
 		if !info.IsDir() {
-			totalSize += info.Size()
-		}
-		return nil
-	})
-
-	return totalSize
-}
-
-func (dm *DownloadMonitor) getFileCount() int {
-	var count int
-
-	filepath.Walk(dm.targetDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil
-		}
-		if !info.IsDir() {
+			size += info.Size()
 			count++
 		}
 		return nil
 	})
+	return size, count
+}
 
+func (dm *DownloadMonitor) getDirectorySize() int64 {
+	size, _ := dm.getDirectoryStats()
+	return size
+}
+
+func (dm *DownloadMonitor) getFileCount() int {
+	_, count := dm.getDirectoryStats()
 	return count
 }
 

@@ -1,6 +1,7 @@
 package monitor
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -19,21 +20,21 @@ type NetworkMonitor struct {
 
 // BandwidthSample represents a single bandwidth measurement
 type BandwidthSample struct {
-	Timestamp time.Time
-	RxBytes   int64
-	TxBytes   int64
-	RxRate    float64 // Mbps
-	TxRate    float64 // Mbps
+	Timestamp time.Time `json:"Timestamp"`
+	RxBytes   int64     `json:"RxBytes"`
+	TxBytes   int64     `json:"TxBytes"`
+	RxRate    float64   `json:"RxRate"` // Mbps
+	TxRate    float64   `json:"TxRate"` // Mbps
 }
 
 // NetworkMetrics represents aggregated network metrics
 type NetworkMetrics struct {
-	AverageBandwidthMbps    float64
-	PeakBandwidthMbps       float64
-	TotalBytesTransferred   int64
-	Duration                time.Duration
-	AverageRxRateMbps       float64
-	AverageTxRateMbps       float64
+	AverageBandwidthMbps  float64       `json:"AverageBandwidthMbps"`
+	PeakBandwidthMbps     float64       `json:"PeakBandwidthMbps"`
+	TotalBytesTransferred int64         `json:"TotalBytesTransferred"`
+	Duration              time.Duration `json:"Duration"`
+	AverageRxRateMbps     float64       `json:"AverageRxRateMbps"`
+	AverageTxRateMbps     float64       `json:"AverageTxRateMbps"`
 }
 
 // NewNetworkMonitor creates a new network monitor
@@ -62,13 +63,13 @@ func getDefaultInterface() string {
 			}
 		}
 	}
-	
+
 	// Try detectNetworkInterface as fallback
 	iface := detectNetworkInterface()
 	if iface != "" {
 		return iface
 	}
-	
+
 	// Ultimate fallback to common interface names
 	return "eth0"
 }
@@ -98,10 +99,30 @@ func (nm *NetworkMonitor) Stop() NetworkMetrics {
 	nm.stopTime = time.Now()
 	nm.monitoring = false
 
-	// Wait a bit for last sample
-	time.Sleep(500 * time.Millisecond)
+	// Use context timeout instead of blocking sleep
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	<-ctx.Done()
+	cancel()
 
 	return nm.calculateMetrics()
+}
+
+// StopInterface implements Monitor interface
+func (nm *NetworkMonitor) StopInterface() interface{} {
+	return nm.Stop()
+}
+
+// IsMonitoring implements Monitor interface
+func (nm *NetworkMonitor) IsMonitoring() bool {
+	return nm.monitoring
+}
+
+// GetDuration implements Monitor interface
+func (nm *NetworkMonitor) GetDuration() time.Duration {
+	if !nm.monitoring {
+		return nm.stopTime.Sub(nm.startTime)
+	}
+	return time.Since(nm.startTime)
 }
 
 func (nm *NetworkMonitor) monitorLoop() {

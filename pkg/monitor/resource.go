@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"runtime"
@@ -24,29 +25,29 @@ type ResourceMonitor struct {
 
 // ResourceSample represents a single resource measurement
 type ResourceSample struct {
-	Timestamp     time.Time
-	CPUPercent    float64 // CPU usage percentage
-	MemoryRSS     int64   // Resident Set Size in bytes
-	MemoryVMS     int64   // Virtual Memory Size in bytes
-	MemoryPercent float64 // Memory usage percentage
-	NumGoroutines int     // Number of goroutines (Go-specific)
-	NumThreads    int     // Number of OS threads
+	Timestamp     time.Time `json:"Timestamp"`
+	CPUPercent    float64   `json:"CPUPercent"`    // CPU usage percentage
+	MemoryRSS     int64     `json:"MemoryRSS"`     // Resident Set Size in bytes
+	MemoryVMS     int64     `json:"MemoryVMS"`     // Virtual Memory Size in bytes
+	MemoryPercent float64   `json:"MemoryPercent"` // Memory usage percentage
+	NumGoroutines int       `json:"NumGoroutines"` // Number of goroutines (Go-specific)
+	NumThreads    int       `json:"NumThreads"`    // Number of OS threads
 }
 
 // ResourceMetrics represents aggregated resource metrics
 type ResourceMetrics struct {
-	Duration          time.Duration
-	CPUAvgPercent     float64
-	CPUPeakPercent    float64
-	MemoryAvgMB       float64
-	MemoryPeakMB      float64
-	MemoryPeakRSS     int64
-	AvgGoroutines     float64
-	PeakGoroutines    int
-	AvgThreads        float64
-	PeakThreads       int
-	Samples           []ResourceSample
-	SampleCount       int
+	Duration       time.Duration      `json:"Duration"`
+	CPUAvgPercent  float64            `json:"CPUAvgPercent"`
+	CPUPeakPercent float64            `json:"CPUPeakPercent"`
+	MemoryAvgMB    float64            `json:"MemoryAvgMB"`
+	MemoryPeakMB   float64            `json:"MemoryPeakMB"`
+	MemoryPeakRSS  int64              `json:"MemoryPeakRSS"`
+	AvgGoroutines  float64            `json:"AvgGoroutines"`
+	PeakGoroutines int                `json:"PeakGoroutines"`
+	AvgThreads     float64            `json:"AvgThreads"`
+	PeakThreads    int                `json:"PeakThreads"`
+	Samples        []ResourceSample   `json:"Samples"`
+	SampleCount    int                `json:"SampleCount"`
 }
 
 // NewResourceMonitor creates a new resource monitor for the current process
@@ -111,9 +112,39 @@ func (rm *ResourceMonitor) Stop() ResourceMetrics {
 	rm.stopTime = time.Now()
 	rm.mu.Unlock()
 
-	time.Sleep(500 * time.Millisecond)
+	// Use context timeout instead of blocking sleep
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	<-ctx.Done()
+	cancel()
 
 	return rm.calculateMetrics()
+}
+
+// StopInterface implements Monitor interface
+func (rm *ResourceMonitor) StopInterface() interface{} {
+	return rm.Stop()
+}
+
+// IsMonitoring implements Monitor interface
+func (rm *ResourceMonitor) IsMonitoring() bool {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+	return rm.monitoring
+}
+
+// GetDuration implements Monitor interface
+func (rm *ResourceMonitor) GetDuration() time.Duration {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+	if !rm.monitoring {
+		return rm.stopTime.Sub(rm.startTime)
+	}
+	return time.Since(rm.startTime)
+}
+
+// GetPollInterval implements PollingMonitor interface
+func (rm *ResourceMonitor) GetPollInterval() time.Duration {
+	return rm.pollInterval
 }
 
 func (rm *ResourceMonitor) monitorLoop() {
@@ -323,11 +354,5 @@ func (rm *ResourceMonitor) calculateMetrics() ResourceMetrics {
 }
 
 // PrintSummary prints a formatted summary of the resource metrics
-func (m *ResourceMetrics) PrintSummary() {
-	fmt.Printf("  │ ─── Resource Usage ───────────────────────────────────────────\n")
-	fmt.Printf("  │   CPU Avg: %.2f%% | Peak: %.2f%%\n", m.CPUAvgPercent, m.CPUPeakPercent)
-	fmt.Printf("  │   Memory Avg: %.2f MB | Peak: %.2f MB\n", m.MemoryAvgMB, m.MemoryPeakMB)
-	fmt.Printf("  │   Goroutines Avg: %.0f | Peak: %d\n", m.AvgGoroutines, m.PeakGoroutines)
-	fmt.Printf("  │   Threads Avg: %.0f | Peak: %d\n", m.AvgThreads, m.PeakThreads)
-}
+// PrintSummary is now in metrics.go to follow OOP principles
 

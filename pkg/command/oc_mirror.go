@@ -3,7 +3,9 @@ package command
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -15,6 +17,7 @@ type OCMirrorCommand struct {
 	output          string
 	from            string
 	cacheDir        string
+	workspace       string
 	skipMissing     bool
 	continueOnError bool
 	skipTLS         bool
@@ -75,6 +78,11 @@ func (cmd *OCMirrorCommand) SetSkipTLS(skip bool) {
 	cmd.skipTLS = skip
 }
 
+// SetWorkspace sets the workspace directory (--workspace flag, v2 only)
+func (cmd *OCMirrorCommand) SetWorkspace(workspace string) {
+	cmd.workspace = workspace
+}
+
 // Execute runs the oc-mirror command
 // Execute runs the oc-mirror command and returns the output
 func (cmd *OCMirrorCommand) Execute() (*CommandOutput, error) {
@@ -89,6 +97,13 @@ func (cmd *OCMirrorCommand) ExecuteWithCallback(onStart func(pid int)) (*Command
 	fmt.Printf("Executing: oc-mirror %s\n", strings.Join(args, " "))
 
 	execCmd := exec.Command("oc-mirror", args...)
+
+	// Set PATH to include ./bin directory for downloaded binaries
+	binDir, pathErr := getBinDirectory()
+	if pathErr == nil {
+		binPath := filepath.Join(binDir, "bin")
+		execCmd.Env = updateCommandEnv(os.Environ(), binPath)
+	}
 
 	var stdout, stderr bytes.Buffer
 	execCmd.Stdout = &stdout
@@ -141,7 +156,12 @@ func (cmd *OCMirrorCommand) buildArgs() []string {
 		if cmd.cacheDir != "" {
 			args = append(args, "--cache-dir", cmd.cacheDir)
 		}
+		if cmd.workspace != "" {
+			args = append(args, "--workspace", cmd.workspace)
+		}
 	} else {
+		// v1 requires explicit --v1 flag (mandatory starting with oc-mirror 4.21)
+		args = append(args, "--v1")
 		// v1 doesn't support --cache-dir flag
 		// v1 is deprecated but we still support it for comparison
 		// v1 supports --skip-missing and --continue-on-error

@@ -1,70 +1,143 @@
-# Binaries
+# Binaries and build artifacts
 bin/
-/oc-mirror-test
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
+oc-mirror-test
+oc-mirror-test.exe
 
-# Test binary, built with `go test -c`
+# Go build artifacts
 *.test
-
-# Output of the go coverage tool
 *.out
-coverage.html
-coverage.txt
-
-# Dependency directories
+*.prof
+*.pprof
 vendor/
 
-# Go workspace file
-go.work
+# Downloaded client tools
+bin/oc
+bin/opm
+bin/oc-mirror
+bin/kubectl
 
-# Generated directories and test artifacts
-oc-mirror-clone/
+# Workspace directories
+workspace/
 oc-mirror-workspace/
+working-dir/
+
+# Mirror directories
 mirror/
-platform/
 operators/
 operators-v1/
 operators-v2/
-results/
-*.yaml.bak
-*.yaml.tmp
 
-# Logs
+# Cache directories
+.oc-mirror/
+.cache/
+cache/
+
+# Results and output
+results/
+*.json
+!go.mod
+!go.sum
+!package.json
+!package-lock.json
+
+# Log files
 *.log
 logs/
+*.log.*
+
+# Archive files
+*.tar
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.zip
+*.gz
+
+# Test results
+test-results/
+coverage/
+*.coverprofile
+*.coverage
+
+# Python cache and artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+*.pyc
+*.pyo
+*.pyd
+
+# Python virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+.project
+.classpath
+.settings/
 
 # Temporary files
 tmp/
 temp/
 *.tmp
 *.bak
-*.swp
-*.swo
-*~
+*.backup
+*.old
 
-# IDE
-.idea/
-.vscode/
-*.code-workspace
-.project
-.classpath
-.settings/
-
-# OS
+# OS-specific files
 .DS_Store
-Thumbs.db
 .DS_Store?
 ._*
 .Spotlight-V100
 .Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
 
-# Editor backups
-*~
-.#*
-\#*#
-.*.swp
-.*.swo
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Monitoring script outputs
+monitor_oc_mirror.py.csv
+metrics.csv
+*.csv
+
+# pcap files (tcpdump output)
+*.pcap
+*.cap
+
+# Keep config directories but ignore generated content
+!oc-mirror-clone/
+!platform/
+oc-mirror-clone/*.yaml.bak
+platform/*.yaml.bak
+
+# Keep documentation
+!*.md
+!LICENSE
+!CONTRIBUTING.md
+!README.md

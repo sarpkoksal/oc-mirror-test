@@ -18,34 +18,34 @@ type OutputVerifier struct {
 
 // OutputMetrics contains metrics about the output directory
 type OutputMetrics struct {
-	TotalSize       int64
-	TotalFiles      int
-	TotalDirs       int
-	DirectoryHash   string            // Combined hash of all file hashes
-	FileHashes      map[string]string // Individual file hashes
-	LargestFiles    []FileInfo        // Top 10 largest files
-	FileTypes       map[string]int    // Count by extension
-	LayerCount      int               // Number of blob layers
-	ManifestCount   int               // Number of manifests
-	SignatureCount  int               // Number of signatures
+	TotalSize       int64            `json:"TotalSize"`
+	TotalFiles      int               `json:"TotalFiles"`
+	TotalDirs       int               `json:"TotalDirs"`
+	DirectoryHash   string            `json:"DirectoryHash"`   // Combined hash of all file hashes
+	FileHashes      map[string]string `json:"FileHashes"`      // Individual file hashes
+	LargestFiles    []FileInfo        `json:"LargestFiles"`    // Top 10 largest files
+	FileTypes       map[string]int    `json:"FileTypes"`       // Count by extension
+	LayerCount      int               `json:"LayerCount"`      // Number of blob layers
+	ManifestCount   int               `json:"ManifestCount"`    // Number of manifests
+	SignatureCount  int               `json:"SignatureCount"`  // Number of signatures
 }
 
 // FileInfo contains information about a single file
 type FileInfo struct {
-	Path string
-	Size int64
-	Hash string
+	Path string `json:"Path"`
+	Size int64  `json:"Size"`
+	Hash string `json:"Hash"`
 }
 
 // ComparisonResult contains the comparison between two outputs
 type OutputComparisonResult struct {
-	Match            bool
-	SizeDifference   int64
-	FileCountDiff    int
-	MissingInFirst   []string
-	MissingInSecond  []string
-	DifferentContent []string
-	HashMatch        bool
+	Match            bool     `json:"Match"`
+	SizeDifference   int64    `json:"SizeDifference"`
+	FileCountDiff    int      `json:"FileCountDiff"`
+	MissingInFirst   []string `json:"MissingInFirst"`
+	MissingInSecond  []string `json:"MissingInSecond"`
+	DifferentContent []string `json:"DifferentContent"`
+	HashMatch        bool     `json:"HashMatch"`
 }
 
 // NewOutputVerifier creates a new output verifier for the given directory
@@ -63,8 +63,10 @@ func (ov *OutputVerifier) Analyze() (OutputMetrics, error) {
 		FileTypes:    make(map[string]int),
 	}
 
+	// Pre-allocate slices with estimated capacity to reduce reallocations
 	var allHashes []string
 	var allFiles []FileInfo
+	allFiles = make([]FileInfo, 0, 1000) // Pre-allocate for better performance
 
 	err := filepath.Walk(ov.directory, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -81,21 +83,25 @@ func (ov *OutputVerifier) Analyze() (OutputMetrics, error) {
 		metrics.TotalFiles++
 		metrics.TotalSize += info.Size()
 
-		// Count file types
-		ext := strings.ToLower(filepath.Ext(path))
+		// Count file types (optimize string operations)
+		ext := filepath.Ext(path)
 		if ext == "" {
 			ext = "(no extension)"
+		} else {
+			// Convert to lowercase only once
+			ext = strings.ToLower(ext)
 		}
 		metrics.FileTypes[ext]++
 
-		// Identify content types
-		if strings.Contains(path, "/blobs/") {
+		// Identify content types (optimize string checks)
+		pathLower := strings.ToLower(path)
+		if strings.Contains(pathLower, "/blobs/") {
 			metrics.LayerCount++
 		}
-		if strings.Contains(path, "manifest") || strings.HasSuffix(path, ".json") {
+		if strings.Contains(pathLower, "manifest") || strings.HasSuffix(pathLower, ".json") {
 			metrics.ManifestCount++
 		}
-		if strings.Contains(path, "signature") || strings.HasSuffix(path, ".sig") {
+		if strings.Contains(pathLower, "signature") || strings.HasSuffix(pathLower, ".sig") {
 			metrics.SignatureCount++
 		}
 
@@ -150,7 +156,7 @@ func (ov *OutputVerifier) Analyze() (OutputMetrics, error) {
 	return metrics, nil
 }
 
-// Compare compares two output directories
+// Compare compares two output directories (optimized with concurrent processing)
 func CompareOutputs(dir1, dir2 string) (OutputComparisonResult, error) {
 	result := OutputComparisonResult{
 		MissingInFirst:   make([]string, 0),
@@ -161,41 +167,73 @@ func CompareOutputs(dir1, dir2 string) (OutputComparisonResult, error) {
 	verifier1 := NewOutputVerifier(dir1)
 	verifier2 := NewOutputVerifier(dir2)
 
-	metrics1, err := verifier1.Analyze()
-	if err != nil {
-		return result, fmt.Errorf("failed to analyze %s: %w", dir1, err)
+	// Analyze both directories concurrently
+	type analyzeResult struct {
+		metrics OutputMetrics
+		err     error
 	}
-
-	metrics2, err := verifier2.Analyze()
-	if err != nil {
-		return result, fmt.Errorf("failed to analyze %s: %w", dir2, err)
+	
+	resultsChan := make(chan analyzeResult, 2)
+	
+	go func() {
+		metrics, err := verifier1.Analyze()
+		resultsChan <- analyzeResult{metrics, err}
+	}()
+	
+	go func() {
+		metrics, err := verifier2.Analyze()
+		resultsChan <- analyzeResult{metrics, err}
+	}()
+	
+	var metrics1, metrics2 OutputMetrics
+	var err1, err2 error
+	
+	// Collect results
+	for i := 0; i < 2; i++ {
+		res := <-resultsChan
+		if i == 0 {
+			metrics1, err1 = res.metrics, res.err
+		} else {
+			metrics2, err2 = res.metrics, res.err
+		}
+	}
+	
+	if err1 != nil {
+		return result, fmt.Errorf("failed to analyze %s: %w", dir1, err1)
+	}
+	if err2 != nil {
+		return result, fmt.Errorf("failed to analyze %s: %w", dir2, err2)
 	}
 
 	result.SizeDifference = metrics1.TotalSize - metrics2.TotalSize
 	result.FileCountDiff = metrics1.TotalFiles - metrics2.TotalFiles
 	result.HashMatch = metrics1.DirectoryHash == metrics2.DirectoryHash
 
-	// Find missing files
-	for path := range metrics1.FileHashes {
-		if _, exists := metrics2.FileHashes[path]; !exists {
-			result.MissingInSecond = append(result.MissingInSecond, path)
+	// Pre-allocate slices with estimated capacity
+	missingInSecond := make([]string, 0, len(metrics1.FileHashes)/10)
+	missingInFirst := make([]string, 0, len(metrics2.FileHashes)/10)
+	differentContent := make([]string, 0, len(metrics1.FileHashes)/10)
+
+	// Find missing files and different content in a single pass
+	for path, hash1 := range metrics1.FileHashes {
+		if hash2, exists := metrics2.FileHashes[path]; exists {
+			if hash1 != hash2 {
+				differentContent = append(differentContent, path)
+			}
+		} else {
+			missingInSecond = append(missingInSecond, path)
 		}
 	}
 
 	for path := range metrics2.FileHashes {
 		if _, exists := metrics1.FileHashes[path]; !exists {
-			result.MissingInFirst = append(result.MissingInFirst, path)
+			missingInFirst = append(missingInFirst, path)
 		}
 	}
 
-	// Find files with different content
-	for path, hash1 := range metrics1.FileHashes {
-		if hash2, exists := metrics2.FileHashes[path]; exists {
-			if hash1 != hash2 {
-				result.DifferentContent = append(result.DifferentContent, path)
-			}
-		}
-	}
+	result.MissingInFirst = missingInFirst
+	result.MissingInSecond = missingInSecond
+	result.DifferentContent = differentContent
 
 	result.Match = result.HashMatch &&
 		len(result.MissingInFirst) == 0 &&
@@ -212,8 +250,10 @@ func hashFile(path string) (string, error) {
 	}
 	defer file.Close()
 
+	// Use buffered I/O for better performance
 	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
+	buf := make([]byte, 32*1024) // 32KB buffer
+	if _, err := io.CopyBuffer(hash, file, buf); err != nil {
 		return "", err
 	}
 

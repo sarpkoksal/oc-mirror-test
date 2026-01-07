@@ -5,6 +5,7 @@ A comprehensive Go-based test automation tool for testing [oc-mirror](https://do
 ## Features
 
 - **Automated Test Execution**: Runs multiple iterations of oc-mirror download and upload phases
+- **Client Tools Downloader**: Native Go implementation for downloading OpenShift client tools (oc, opm, oc-mirror) with concurrent downloads and automatic system detection
 - **V1 vs V2 Comparison**: Compare performance between oc-mirror v1 and v2 using the same imageset configuration
 - **Clean vs Cached Analysis**: Automatically compares first full mirror run with subsequent incremental updates
 - **Comprehensive Metrics Collection**:
@@ -12,9 +13,11 @@ A comprehensive Go-based test automation tool for testing [oc-mirror](https://do
   - Bytes uploaded to registry (parsed from oc-mirror logs)
   - oc-mirror verbose/debug logs to detect cache hits and skipped images
   - Network utilization (bandwidth monitoring via sysfs/proc)
+- **Web UI Dashboard**: Interactive web interface for viewing metrics with charts and real-time updates
 - **Structured Output**: Well-formatted console output with detailed comparisons
 - **JSON Results Export**: Saves detailed results to JSON files for further analysis
 - **Dynamic Registry URL**: Accepts registry URL as command-line argument
+- **Performance Optimized**: Concurrent downloads, buffered I/O, caching, and optimized file operations
 
 ## Project Structure
 
@@ -25,7 +28,9 @@ NGC-495/
 ├── pkg/
 │   ├── runner/               # Test runner orchestration
 │   ├── command/              # oc-mirror command wrapper
-│   └── monitor/              # Network monitoring
+│   ├── monitor/              # Network monitoring
+│   ├── client/               # Client tools downloader
+│   └── webui/                # Web UI server
 ├── internal/
 │   └── config/               # Configuration file generation
 ├── bin/                      # Built binaries (generated)
@@ -40,7 +45,7 @@ NGC-495/
 ## Prerequisites
 
 - **Go 1.21+**: Required for building and running the tool
-- **oc-mirror CLI**: Must be installed and available in PATH. [oc-mirror CLI](https://mirror.openshift.com/pub/openshift-v4/clients/ocp/4.20.4/oc-mirror.tar.gz) can be download from reference link.
+- **oc-mirror CLI**: Must be installed and available in PATH. Can be automatically downloaded using the `download` command (see below)
 - **Linux System**: Required for network monitoring (uses sysfs/proc)
 - **Sufficient Disk Space**: For mirror operations and cache storage
 - **Network Access**: To registry.redhat.io and target registry
@@ -75,6 +80,62 @@ make build
 
 ## Usage
 
+### Web UI with Live Metrics
+
+The web UI can run tests in the background and display live metrics as tests execute:
+
+```bash
+# Start web UI and run tests concurrently
+./bin/oc-mirror-test webui \
+  --registry 192.168.1.21:5000/ocp/ \
+  --iterations 2 \
+  --compare-v1-v2 \
+  --skip-tls
+
+# Start web UI on custom port
+./bin/oc-mirror-test webui --port 3000 -r docker://registry.example.com/ocp/
+
+# Start web UI without running tests (view existing results)
+./bin/oc-mirror-test webui
+```
+
+**Features:**
+- **Live Metrics**: Real-time updates every 2 seconds when tests are running
+- **Auto-refresh**: Automatically enabled when tests are running
+- **Background Execution**: Tests run in background while web UI serves metrics
+- **Status Indicators**: Shows test execution status
+- **Interactive Charts**: Real-time chart updates as metrics are collected
+
+Open your browser to `http://localhost:8080` (or your custom port) to view the dashboard.
+
+### Downloading Client Tools
+
+The tool includes a native Go implementation for downloading OpenShift client tools:
+
+```bash
+# Download all tools (oc, opm, oc-mirror)
+./bin/oc-mirror-test download
+
+# Download specific tools
+./bin/oc-mirror-test download --tools oc,oc-mirror
+
+# Specify OpenShift version
+./bin/oc-mirror-test download --version 4.20
+
+# Custom binary directory
+./bin/oc-mirror-test download --bin-dir /usr/local/bin
+```
+
+**Features:**
+- Automatic system detection (architecture, OS, RHEL version)
+- Concurrent downloads for faster installation
+- Progress reporting during downloads
+- Automatic verification of installed tools
+- Fallback to latest version if specified version fails
+- Checks PATH first before downloading
+
+The tool will automatically check for required tools before running tests and download them if needed.
+
 ### Basic Usage
 
 ```bash
@@ -86,6 +147,7 @@ make build
 - `--registry` / `-r`: **Required**. Registry URL for upload (e.g., `docker://infra.5g-deployment.lab:8443/ngc-495/`)
 - `--iterations` / `-i`: Number of iterations to run (default: 2, minimum: 2 for clean vs cached comparison)
 - `--compare-v1-v2`: Enable v1 vs v2 comparison mode
+- `--skip-tls`: Skip TLS verification for destination registry
 
 ### Examples
 
@@ -270,7 +332,37 @@ make build
 
 # Build with custom version
 VERSION=1.0.0 make build
+
+# Quick build (faster, less optimizations)
+make build-fast
 ```
+
+### Downloading Client Tools
+
+The Makefile includes convenient targets for downloading OpenShift client tools:
+
+```bash
+# Download all tools (oc, opm, oc-mirror)
+make download
+
+# Download specific tools
+make download-oc
+make download-opm
+make download-oc-mirror
+
+# Download with custom OpenShift version
+OCP_VERSION=4.19 make download
+
+# Download specific tools only
+CLIENT_TOOLS=oc,oc-mirror make download
+
+# Setup everything (build + download tools)
+make setup
+```
+
+**Makefile Variables:**
+- `OCP_VERSION`: OpenShift version to download (default: 4.20)
+- `CLIENT_TOOLS`: Comma-separated list of tools (default: oc,opm,oc-mirror)
 
 ### Testing
 
